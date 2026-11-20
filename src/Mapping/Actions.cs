@@ -3,6 +3,8 @@ using System.Collections.Generic;
 
 namespace DeckMapper;
 
+enum MouseButton { Left, Right, Middle, X1, X2 }
+
 abstract record InputToken;
 sealed record KeyToken(KeyDef Key) : InputToken;
 sealed record MouseToken(MouseButton Button) : InputToken;
@@ -18,6 +20,8 @@ sealed record LayerAction(string Name) : BindingAction;
 sealed record ProfileAction(string Name) : BindingAction;
 sealed record NextProfileAction : BindingAction;
 sealed record EditorAction : BindingAction;
+/// <summary>Trzymaj = koło szybkiego wyboru profilu, puść = wybór podświetlonego slotu (środek = anuluj).</summary>
+sealed record ProfileWheelAction : BindingAction;
 
 static class ActionParser
 {
@@ -43,6 +47,7 @@ static class ActionParser
             if (t.Equals("@Pause", StringComparison.OrdinalIgnoreCase)) { action = new PauseAction(); return true; }
             if (t.Equals("@NextProfile", StringComparison.OrdinalIgnoreCase)) { action = new NextProfileAction(); return true; }
             if (t.Equals("@Editor", StringComparison.OrdinalIgnoreCase)) { action = new EditorAction(); return true; }
+            if (t.Equals("@ProfileWheel", StringComparison.OrdinalIgnoreCase)) { action = new ProfileWheelAction(); return true; }
             if (t.StartsWith("@Layer:", StringComparison.OrdinalIgnoreCase) && t.Length > 7)
             {
                 action = new LayerAction(t[7..].Trim());

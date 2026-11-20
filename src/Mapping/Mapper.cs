@@ -17,6 +17,10 @@ sealed class Mapper
     readonly List<string> _layers = new();
     double _accX, _accY;
 
+    // ile kontrolek trzyma dany klawisz / przycisk myszy (ten sam klawisz na kilku kontrolkach)
+    readonly HeldCounter<KeyDef> _heldKeys = new();
+    readonly HeldCounter<MouseButton> _heldMouse = new();
+
     public Mapper(CompiledConfig config) => _config = config;
 
     public CompiledConfig Config => _config;
@@ -31,9 +35,25 @@ sealed class Mapper
     public event Action<string?>? ProfileRequested;
     public event Action? EditorRequested;
 
+    // ---------- koło profili (stan tylko w wątku kontrolera; do UI idą wyłącznie zdarzenia) ----------
+
+    /// <summary>Sloty i martwe strefy koła – podmieniane przez worker (niemutowalna migawka).</summary>
+    public WheelSnapshot Wheel { get; set; } = WheelSnapshot.Empty;
+    int _wheelControl = -1;
+    int? _wheelSector;
+    WheelSnapshot _wheelOpen = WheelSnapshot.Empty;
+
+    public bool WheelIsOpen => _wheelControl >= 0;
+    /// <summary>Koło otwarte: sloty (nazwy profili / null).</summary>
+    public event Action<IReadOnlyList<string?>>? WheelOpened;
+    public event Action<int?>? WheelSectorChanged;
+    /// <summary>Koło zamknięte: wybrany profil albo null (anulowano: środek / pusty slot / przerwanie).</summary>
+    public event Action<string?>? WheelClosed;
+
     public void SetConfig(CompiledConfig config)
     {
-        ReleaseAll();
+        CancelWheel("zmiana profilu");
+        ReleaseAll("zmiana/przeładowanie profilu", rearm: true);
         _config = config;
     }
 
@@ -45,19 +65,32 @@ sealed class Mapper
     {
         if (suspended == Suspended) return;
         Suspended = suspended;
-        if (suspended) ReleaseAll();
+        if (suspended) CancelWheel("edytor");
+        if (suspended) ReleaseAll("edytor – wstrzymanie", rearm: false);
     }
 
     public void Process(DeckState state, double dt)
     {
         Evaluate(_config, state, _current);
 
+        if (WheelIsOpen)
+        {
+            // koło otwarte: mapowanie wstrzymane, liczy się tylko wybór sektora i puszczenie przycisku koła
+            ProcessWheel(state);
+            Array.Copy(_current, _previous, Count);
+            return;
+        }
+
         if (!Suspended)
         {
             for (int i = 0; i < Count; i++)
                 if (_previous[i] && !_current[i]) Release(i);
             for (int i = 0; i < Count; i++)
-                if (!_previous[i] && _current[i]) Press(i);
+                if (!_previous[i] && _current[i])
+                {
+                    Press(i);
+                    if (WheelIsOpen) break; // reszta wciśnięć z tej klatki nie może przejść obok koła
+                }
         }
 
         Array.Copy(_current, _previous, Count);
@@ -71,11 +104,27 @@ sealed class Mapper
 
     public void TogglePause() => SetPaused(!Paused);
 
-    /// <summary>Puszcza wszystko, co trzymamy (np. przy rozłączeniu albo zmianie configu).</summary>
-    public void ReleaseAll()
+    /// <summary>
+    /// Puszcza wszystko, co trzymamy (np. przy rozłączeniu albo zmianie configu).
+    /// rearm = trzymane klawisze/warstwy wcisną się znowu w następnym obiegu, jeśli przycisk Decka nadal jest
+    /// trzymany. Bez tego np. W na RT puszczało się „samo” i wracało dopiero po ponownym pociągnięciu spustu.
+    /// Akcje jednorazowe (profil, tekst, klawiatura, pauza, edytor) NIE są ponawiane – trzymany @NextProfile
+    /// przełączałby profile w kółko.
+    /// </summary>
+    public void ReleaseAll(string reason, bool rearm)
     {
-        for (int i = 0; i < Count; i++) Release(i);
+        var held = new List<string>();
+        for (int i = 0; i < Count; i++)
+        {
+            var action = _held[i];
+            if (action is null) continue;
+            held.Add(((DeckControl)i).ToString());
+            Release(i);
+            if (rearm && action is ChordAction or LayerAction) _previous[i] = false;
+        }
         _layers.Clear();
+        if (held.Count > 0)
+            Log.Info($"Puszczono trzymane ({reason}): {string.Join(", ", held)}{(rearm ? " – wcisną się znowu, jeśli dalej trzymasz" : "")}");
     }
 
     /// <summary>Stan wszystkich kontrolek (także wirtualnych). Bez efektów ubocznych – używa go też podgląd w edytorze.</summary>
@@ -146,7 +195,49 @@ sealed class Mapper
             case EditorAction:
                 EditorRequested?.Invoke();
                 break;
+            case ProfileWheelAction:
+                OpenWheel(index);
+                break;
         }
+    }
+
+    void OpenWheel(int control)
+    {
+        var wheel = Wheel;
+        if (wheel.Slots.Count < WheelSettings.MinSlots) return;
+        _held[control] = null; // sam przycisk koła nie jest „trzymanym klawiszem”
+        ReleaseAll("koło profili", rearm: false); // trzymane klawisze puszczone (np. W w aucie)
+        _wheelControl = control;
+        _wheelSector = null;
+        _wheelOpen = wheel;
+        Log.Info($"Koło profili: otwarte ({(DeckControl)control}, slotów: {wheel.Slots.Count})");
+        WheelOpened?.Invoke(wheel.Slots);
+    }
+
+    void ProcessWheel(DeckState s)
+    {
+        if (!_current[_wheelControl])
+        {
+            var profile = WheelSelector.Result(_wheelOpen.Slots, _wheelSector);
+            Log.Info($"Koło profili: puszczone – {(profile != null ? "wybrano " + profile : _wheelSector == null ? "środek, anulowano" : "pusty slot, anulowano")}");
+            _wheelControl = -1;
+            WheelClosed?.Invoke(profile);
+            return;
+        }
+
+        var sector = WheelSelector.Select(s.RightX, s.RightY, s.LeftPadTouched, s.LeftPadX, s.LeftPadY,
+            _wheelOpen.Slots.Count, _wheelOpen.Settings);
+        if (sector == _wheelSector) return;
+        _wheelSector = sector;
+        WheelSectorChanged?.Invoke(sector);
+    }
+
+    void CancelWheel(string reason)
+    {
+        if (!WheelIsOpen) return;
+        _wheelControl = -1;
+        Log.Info($"Koło profili: przerwane ({reason})");
+        WheelClosed?.Invoke(null);
     }
 
     void Release(int index)
@@ -189,22 +280,32 @@ sealed class Mapper
         PausedChanged?.Invoke(paused);
     }
 
-    static void Down(InputToken token)
+    void Down(InputToken token)
     {
         switch (token)
         {
-            case KeyToken k: InputSender.KeyDown(k.Key); break;
-            case MouseToken m: InputSender.MouseButtonEvent(m.Button, true); break;
-            case WheelToken w: InputSender.Wheel(w.Delta, w.Horizontal); break;
+            case KeyToken k:
+                if (_heldKeys.Press(k.Key)) InputSender.KeyDown(k.Key);
+                break;
+            case MouseToken m:
+                if (_heldMouse.Press(m.Button)) InputSender.MouseButtonEvent(m.Button, true);
+                break;
+            case WheelToken w:
+                InputSender.Wheel(w.Delta, w.Horizontal);
+                break;
         }
     }
 
-    static void Up(InputToken token)
+    void Up(InputToken token)
     {
         switch (token)
         {
-            case KeyToken k: InputSender.KeyUp(k.Key); break;
-            case MouseToken m: InputSender.MouseButtonEvent(m.Button, false); break;
+            case KeyToken k:
+                if (_heldKeys.Release(k.Key)) InputSender.KeyUp(k.Key);
+                break;
+            case MouseToken m:
+                if (_heldMouse.Release(m.Button)) InputSender.MouseButtonEvent(m.Button, false);
+                break;
         }
     }
 
@@ -229,4 +330,10 @@ sealed class Mapper
         _accY -= dy;
         InputSender.MoveMouse(dx, dy);
     }
+}
+
+/// <summary>Migawka konfiguracji koła dla wątku kontrolera.</summary>
+sealed record WheelSnapshot(IReadOnlyList<string?> Slots, WheelSettings Settings)
+{
+    public static readonly WheelSnapshot Empty = new(Array.Empty<string?>(), new WheelSettings());
 }

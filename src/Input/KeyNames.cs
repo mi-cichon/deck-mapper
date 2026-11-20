@@ -8,17 +8,32 @@ readonly record struct KeyDef(ushort ScanCode, bool Extended);
 
 static class KeyNames
 {
+    // kolejność rejestracji nazw – MUSI być zainicjalizowana przed Map (Build() ją wypełnia)
+    static readonly List<(string Name, KeyDef Key)> Order = new();
     static readonly Dictionary<string, KeyDef> Map = Build();
+    static readonly Dictionary<KeyDef, string> Names = BuildNames();
 
     public static readonly KeyDef LeftShift = Map["LShift"];
 
     public static bool TryGet(string name, out KeyDef key) => Map.TryGetValue(name.Trim(), out key);
 
+    /// <summary>Kanoniczna (pierwsza zarejestrowana) nazwa klawisza albo null, gdy scancode nie ma nazwy.</summary>
+    public static string? NameOf(KeyDef key) => Names.TryGetValue(key, out var name) ? name : null;
+
+    static Dictionary<KeyDef, string> BuildNames()
+    {
+        // kolejność jak w Build(): pierwsza nazwa danego scancode'u wygrywa ("Esc", nie "Escape")
+        var names = new Dictionary<KeyDef, string>();
+        foreach (var (name, key) in Order) names.TryAdd(key, name);
+        return names;
+    }
+
     static Dictionary<string, KeyDef> Build()
     {
         var m = new Dictionary<string, KeyDef>(StringComparer.OrdinalIgnoreCase);
-        void N(int sc, params string[] names) { foreach (var n in names) m[n] = new KeyDef((ushort)sc, false); }
-        void E(int sc, params string[] names) { foreach (var n in names) m[n] = new KeyDef((ushort)sc, true); }
+        void Add(string n, KeyDef k) { m[n] = k; Order.Add((n, k)); }
+        void N(int sc, params string[] names) { foreach (var n in names) Add(n, new KeyDef((ushort)sc, false)); }
+        void E(int sc, params string[] names) { foreach (var n in names) Add(n, new KeyDef((ushort)sc, true)); }
         void Row(int first, string keys) { for (int i = 0; i < keys.Length; i++) N(first + i, keys[i].ToString()); }
 
         N(0x01, "Esc", "Escape");

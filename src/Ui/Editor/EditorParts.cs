@@ -9,12 +9,23 @@ namespace DeckMapper;
 
 enum RowState { Empty, Set, Inherited, Overridden, Invalid }
 
+/// <summary>
+/// Plakietka „co robi tu lizard”: klawisz (Struck = filtr go połyka) albo sprzętowa mysz (Locked – działa zawsze).
+/// </summary>
+sealed record LizardBadge(string Text, bool Struck, bool Locked, string Tooltip);
+
 /// <summary>Lista wszystkich kontrolek Decka pogrupowana, z akcją przypisaną w bazie/warstwie.</summary>
 sealed class BindingListView : TouchList
 {
-    public sealed record Row(string Action, RowState State, string? Tag, string? Note, Color? NoteColor);
+    public sealed record Row(string Action, RowState State, string? Tag, string? Note, Color? NoteColor, LizardBadge? Badge = null);
+
+    static readonly Font BadgeFont = new("Segoe UI", 9f);
+    static readonly Font BadgeStruck = new("Segoe UI", 9f, FontStyle.Strikeout);
 
     readonly List<object> _items = new(); // string = nagłówek grupy, ControlInfo = wiersz
+    readonly List<(Rectangle Bounds, string Text)> _badgeTips = new(); // z ostatniego rysowania
+    readonly ToolTip _tip = new() { InitialDelay = 300, AutoPopDelay = 10000 };
+    string? _tipText;
     DeckControl? _flash;
     long _flashUntil;
 
@@ -55,6 +66,30 @@ sealed class BindingListView : TouchList
         Invalidate();
     }
 
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        _badgeTips.Clear();
+        base.OnPaint(e);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        string? text = null;
+        foreach (var (bounds, tip) in _badgeTips)
+            if (bounds.Contains(e.Location)) { text = tip; break; }
+        if (text == _tipText) return;
+        _tipText = text;
+        _tip.SetToolTip(this, text ?? "");
+        if (text == null) _tip.Hide(this);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _tip.Dispose();
+        base.Dispose(disposing);
+    }
+
     public void Tick()
     {
         if (_flash != null && Environment.TickCount64 > _flashUntil)
@@ -62,6 +97,41 @@ sealed class BindingListView : TouchList
             _flash = null;
             Invalidate();
         }
+    }
+
+    /// <summary>Plakietka lizarda wyrównana do prawej krawędzi right, wyśrodkowana w pionie na centerY.</summary>
+    Rectangle PaintBadge(Graphics g, LizardBadge badge, int right, int centerY)
+    {
+        const TextFormatFlags Flags = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter;
+        var font = badge.Struck ? BadgeStruck : BadgeFont;
+        int lockW = badge.Locked ? LogicalToDeviceUnits(14) : 0;
+        var size = TextRenderer.MeasureText(badge.Text, font);
+        int h = size.Height + LogicalToDeviceUnits(6);
+        int w = size.Width + lockW + LogicalToDeviceUnits(12);
+        var r = new Rectangle(right - w, centerY - h / 2, w, h);
+
+        var fill = badge.Locked ? Color.FromArgb(40, 70, 52) : badge.Struck ? Theme.Panel : Color.FromArgb(78, 62, 30);
+        var color = badge.Locked ? Theme.Ok : badge.Struck ? Theme.TextFaint : Theme.Warning;
+        using (var path = Gfx.RoundedRect(r, h / 2))
+        using (var brush = new SolidBrush(fill))
+            g.FillPath(brush, path);
+
+        int x = r.X + LogicalToDeviceUnits(6);
+        if (badge.Locked)
+        {
+            // kłódka: kabłąk + korpus
+            int bw = LogicalToDeviceUnits(9), bh = LogicalToDeviceUnits(7);
+            var body = new Rectangle(x, centerY - bh / 2 + LogicalToDeviceUnits(2), bw, bh);
+            using var pen = new Pen(color, Math.Max(1f, DeviceDpi / 96f * 1.5f));
+            using var brush = new SolidBrush(color);
+            g.DrawArc(pen, body.X + LogicalToDeviceUnits(1), body.Y - LogicalToDeviceUnits(6), bw - LogicalToDeviceUnits(2), LogicalToDeviceUnits(10), 180, 180);
+            g.FillRectangle(brush, body);
+            x += lockW;
+        }
+        TextRenderer.DrawText(g, badge.Text, font, new Rectangle(x, r.Y, r.Right - x, r.Height), color, Flags);
+
+        _badgeTips.Add((r, badge.Tooltip));
+        return r;
     }
 
     protected override void PaintItem(Graphics g, int index, Rectangle b, bool pressed)
@@ -103,6 +173,12 @@ sealed class BindingListView : TouchList
         int actionW = Math.Min((int)(rect.Width * 0.45f), LogicalToDeviceUnits(440));
         int nameX = badge.Right + pad;
         var nameRect = new Rectangle(nameX, rect.Y, rect.Right - actionW - pad * 2 - nameX, rect.Height);
+
+        if (row.Badge is { } lizard)
+        {
+            var pill = PaintBadge(g, lizard, nameRect.Right, rect.Y + rect.Height / 2);
+            nameRect.Width = Math.Max(0, pill.Left - pad / 2 - nameRect.X);
+        }
         var actionRect = new Rectangle(rect.Right - actionW - pad, rect.Y, actionW, rect.Height);
 
         int h1 = TextRenderer.MeasureText("Ag", Theme.Bold).Height;
@@ -127,6 +203,7 @@ sealed class BindingListView : TouchList
             _ => (Theme.Text, Theme.Bold),
         };
         var flags = Line | TextFormatFlags.Right;
+
         if (row.Tag == null)
             TextRenderer.DrawText(g, row.Action, actionFont, actionRect, actionColor, flags | TextFormatFlags.VerticalCenter);
         else
@@ -212,5 +289,82 @@ sealed class RowPanel : Panel
         int w = (Width - gap * (n - 1)) / n;
         for (int i = 0; i < n; i++)
             Controls[i].Bounds = new Rectangle(i * (w + gap), 0, w, Height);
+    }
+}
+
+/// <summary>
+/// Podgląd koła profili w edytorze. Rysuje tym samym WheelRendererem co nakładka w grze (bitmapa w cache,
+/// przerysowanie tylko przy zmianie danych/sektora). Stuknięcie w sektor = wybór slotu (ta sama geometria co w grze).
+/// LiveSector = sektor wskazywany teraz prawą gałką / lewym touchpadem (ma pierwszeństwo przed zaznaczeniem).
+/// </summary>
+sealed class WheelPreview : Control
+{
+    readonly string _iconsDir;
+    List<WheelItem> _items = new();
+    int _selected;
+    int? _live;
+    Bitmap? _cache;
+    string _cacheKey = "";
+
+    public WheelPreview(string iconsDir)
+    {
+        _iconsDir = iconsDir;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false);
+        BackColor = Theme.Back;
+    }
+
+    public event Action<int>? SlotClicked;
+
+    public void SetItems(List<WheelItem> items, int selected)
+    {
+        _items = items;
+        _selected = selected;
+        Invalidate();
+    }
+
+    public int? LiveSector
+    {
+        get => _live;
+        set
+        {
+            if (_live == value) return;
+            _live = value;
+            Invalidate();
+        }
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        int d = Math.Min(Width, Height);
+        float c = d / 2f;
+        // y ekranu rośnie w dół, WheelSelector oczekuje y w górę
+        var sector = WheelSelector.Sector((e.X - c) / c, (c - e.Y) / c, _items.Count, 0.3f);
+        if (sector is { } s) SlotClicked?.Invoke(s);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.Clear(BackColor);
+        int d = Math.Min(Width, Height);
+        if (d < 40 || _items.Count == 0) return;
+
+        int? highlight = _live ?? _selected;
+        var key = $"{d}|{highlight}|{string.Join("|", _items)}";
+        if (_cache == null || key != _cacheKey)
+        {
+            _cache?.Dispose();
+            _cache = WheelRenderer.Render(d, _items, highlight, _iconsDir);
+            _cacheKey = key;
+        }
+        e.Graphics.DrawImageUnscaled(_cache, 0, 0);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _cache?.Dispose();
+        base.Dispose(disposing);
     }
 }

@@ -17,8 +17,12 @@ sealed class SteamDeckController : IDisposable
     const int VendorId = 0x28DE;
     const int ProductId = 0x1205;
     const byte ReportDeckState = 0x09;
-    const byte CmdClearDigitalMappings = 0x81;      // wyłącza klawisze lizard mode
-    const byte CmdSetDefaultDigitalMappings = 0x85; // przywraca je
+    // Komendy feature reportów – Linux drivers/hid/hid-steam.c (enum ID_*), SDL controller_constants.h.
+    // Używamy tylko przywrócenia domyślnego lizarda, jak steam_set_lizard_mode(true). Celowo NIE ma tu
+    // 0x81 CLEAR_DIGITAL_MAPPINGS: na Decku wyłącza też mysz lizarda (PoC 2026-11-20, branch poc/own-mouse),
+    // ani komend zapisujących na stałe / factory reset.
+    const byte IdSetDefaultDigitalMappings = 0x85; // ID_SET_DEFAULT_DIGITAL_MAPPINGS – domyślne klawisze/kliki lizarda
+    const byte IdLoadDefaultSettings = 0x8E;       // ID_LOAD_DEFAULT_SETTINGS – domyślne ustawienia (m.in. mysz z padu)
 
     public const int ReportLength = 60;
 
@@ -174,24 +178,36 @@ sealed class SteamDeckController : IDisposable
     static float Trigger(ReadOnlySpan<byte> d, int offset) =>
         Math.Clamp(BinaryPrimitives.ReadUInt16LittleEndian(d.Slice(offset, 2)) / 32767f, 0f, 1f);
 
-    public void ClearLizardButtons() => SendCommand(CmdClearDigitalMappings);
-
-    public void RestoreLizardButtons() => SendCommand(CmdSetDefaultDigitalMappings);
-
-    void SendCommand(byte command)
+    /// <summary>
+    /// Domyślny lizard: 0x85 + 0x8E (oba – samo 0x85 nie przywraca myszy z touchpada po wcześniejszym 0x81,
+    /// np. po starej wersji z disableLizardButtons). Każda komenda logowana z wynikiem.
+    /// </summary>
+    public bool RestoreDefaultLizard(string reason)
     {
-        if (_stream == null || _device == null) return;
+        bool mappings = SendCommand(IdSetDefaultDigitalMappings, "SET_DEFAULT_DIGITAL_MAPPINGS");
+        bool settings = SendCommand(IdLoadDefaultSettings, "LOAD_DEFAULT_SETTINGS");
+        Log.Info($"Lizard: przywrócenie domyślnego ({reason}) – {(mappings && settings ? "OK" : "BŁĄD")}");
+        return mappings && settings;
+    }
+
+    /// <summary>Feature report: [0] = report ID 0, [1] = komenda, [2] = długość danych (0).</summary>
+    bool SendCommand(byte command, string name)
+    {
+        if (_stream == null || _device == null) return false;
         try
         {
             int length = _device.GetMaxFeatureReportLength();
-            if (length < 3) return;
-            var buffer = new byte[length]; // [0] = report ID 0
+            if (length < 3) return false;
+            var buffer = new byte[length];
             buffer[1] = command;
             _stream.SetFeature(buffer);
+            Log.Info($"HID 0x{command:X2} {name}: OK");
+            return true;
         }
         catch (Exception e)
         {
-            Log.Info($"Nie udało się wysłać komendy 0x{command:X2}: {e.Message}");
+            Log.Info($"HID 0x{command:X2} {name}: BŁĄD – {e.Message}");
+            return false;
         }
     }
 

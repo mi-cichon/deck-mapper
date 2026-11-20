@@ -123,12 +123,15 @@ sealed class TextPrompt : DarkDialog
     readonly TextBox _box;
     readonly Label _error;
     readonly Func<string, string?>? _validate;
+    readonly Func<string, string>? _hint;
     readonly KeyboardHost _keyboard;
     readonly bool _keyboardWasVisible;
 
-    TextPrompt(string title, string label, string initial, Func<string, string?>? validate, KeyboardHost keyboard)
+    TextPrompt(string title, string label, string initial, Func<string, string?>? validate, KeyboardHost keyboard,
+        Func<string, string>? hint)
     {
         _validate = validate;
+        _hint = hint;
         _keyboard = keyboard;
         _keyboardWasVisible = keyboard.Visible;
 
@@ -149,7 +152,7 @@ sealed class TextPrompt : DarkDialog
             BorderStyle = BorderStyle.FixedSingle,
         };
         _box.Bounds = new Rectangle(pad, textLabel.Bottom + S(4), Width - pad * 2 - S(150), S(40));
-        _box.TextChanged += (_, _) => _error!.Text = "";
+        _box.TextChanged += (_, _) => ShowHint();
 
         var kb = new DarkButton("Klawiatura");
         kb.Bounds = new Rectangle(_box.Right + S(10), _box.Top - S(6), S(140), S(54));
@@ -167,6 +170,14 @@ sealed class TextPrompt : DarkDialog
         ok.Click += (_, _) => Accept();
 
         Controls.AddRange(new Control[] { titleLabel, textLabel, _box, kb, _error, cancel, ok });
+        ShowHint();
+    }
+
+    /// <summary>Podpowiedź na żywo pod polem (np. licznik „3/6”); błąd walidacji ją zastępuje.</summary>
+    void ShowHint()
+    {
+        _error.ForeColor = Theme.TextDim;
+        _error.Text = _hint?.Invoke(_box.Text) ?? "";
     }
 
     public string Value => _box.Text.Trim();
@@ -176,6 +187,7 @@ sealed class TextPrompt : DarkDialog
         var error = _validate?.Invoke(Value);
         if (error != null)
         {
+            _error.ForeColor = Theme.Warning;
             _error.Text = error;
             return;
         }
@@ -208,9 +220,9 @@ sealed class TextPrompt : DarkDialog
     }
 
     public static string? Ask(IWin32Window? owner, KeyboardHost keyboard, string title, string label, string initial = "",
-        Func<string, string?>? validate = null)
+        Func<string, string?>? validate = null, Func<string, string>? hint = null)
     {
-        using var dialog = new TextPrompt(title, label, initial, validate, keyboard);
+        using var dialog = new TextPrompt(title, label, initial, validate, keyboard, hint);
         return dialog.ShowDialog(owner) == DialogResult.OK ? dialog.Value : null;
     }
 }

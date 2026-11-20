@@ -28,10 +28,16 @@ static class DefaultConfig
 //   "@Profile:MTA"             – przełącz na profil "MTA"
 //   "@NextProfile"             – następny profil (alfabetycznie)
 //   "@Editor"                  – otwórz edytor mapowania
+//   "@ProfileWheel"            – trzymaj = koło profili (prawa gałka / lewy touchpad), puść = wybór
 //   "" albo "none"             – nic (w warstwie: wyłącza przypisanie bazowe)
 //
-// UWAGA: MTA ignoruje programową mysz. Kamera i strzelanie zostają na lizard mode:
-// prawy touchpad = kursor, R2 = lewy klik, L2 = prawy klik.
+// LIZARD MODE: mysz zostaje sprzętowa (prawy touchpad = kursor, R2 = lewy klik, L2 = prawy klik) –
+// tylko taką MTA przyjmuje na serwerze. Klawisze, które lizard sam wysyła (np. Enter pod A),
+// połyka filtr: "lizard": { "filterKeys": true, "swallow": "auto" } ("auto" = wszystkie z lizard-map.json,
+// albo lista, np. ["Enter", "Esc"]). Akcje myszy (LMB, rightStick.mode = "mouse") w MTA na serwerze nie działają.
+//
+// KOŁO PROFILI: "wheelLabel": "MTA" (maks. 6 znaków; brak = początek nazwy), "wheelIcon": "🚗" albo "auto.png"
+// (plik z profiles/icons/). Sloty koła ustawia się w edytorze (zakładka Koło), zapisują się w settings.json.
 
 """;
 
@@ -41,9 +47,8 @@ static class DefaultConfig
   "triggerThreshold": 0.5,
   "leftPadDeadzone": 0.3,
 
-  // true = wyłącza klawisze, które kontroler sam wysyła w lizard mode
-  // (np. Enter / Esc / strzałki). Może przy okazji wyłączyć kliki R2/L2 – przetestuj.
-  "disableLizardButtons": false,
+  // filtr klawiszy lizarda: mysz z touchpada działa, A/B/d-pad nie wysyłają Enter/Esc/strzałek
+  "lizard": { "filterKeys": true, "swallow": "auto" },
 
   "leftStick":  { "mode": "keys" },
   "rightStick": { "mode": "mouse", "mouseSpeed": 1200, "curve": 2.0 },

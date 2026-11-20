@@ -133,6 +133,7 @@ static class KeyCatalog
             KeyboardAction => "Klawiatura ekranowa",
             PauseAction => "Wstrzymaj / wznów",
             EditorAction => "Otwórz edytor",
+            ProfileWheelAction => "Koło profili (trzymaj)",
             NextProfileAction => "Następny profil",
             LayerAction l => $"Warstwa „{l.Name}” (trzymaj)",
             ProfileAction p => $"Profil „{p.Name}”",

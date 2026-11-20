@@ -48,6 +48,8 @@ sealed class ProfileManager : IDisposable
     /// <summary>Lista profili mogła się zmienić (dodanie, usunięcie, zmiana nazwy, zmiana pliku).</summary>
     public event Action? ProfilesChanged;
     public event Action<string, string, ToolTipIcon>? Notify;
+    /// <summary>Zmieniły się sloty koła profili (edycja, zmiana nazwy/usunięcie profilu).</summary>
+    public event Action<WheelSettings>? WheelChanged;
 
     public List<string> Names => Store.List();
 
@@ -67,6 +69,9 @@ sealed class ProfileManager : IDisposable
         }
 
         Settings = AppSettings.Load(_settingsPath);
+        var removed = new List<string>();
+        Settings.Wheel.Slots = WheelSlots.Normalize(Settings.Wheel.Slots, Store.Find, removed);
+        foreach (var r in removed) Log.Info($"Koło profili: profil „{r}” nie istnieje – slot wyczyszczony");
         var name = Store.Find(Settings.ActiveProfile) ?? Store.Find(ProfileStore.DefaultProfileName) ?? Names.FirstOrDefault();
 
         CompiledConfig? config = null;
@@ -177,6 +182,7 @@ sealed class ProfileManager : IDisposable
                 rule.Profile = newName;
         if (string.Equals(Settings.DefaultProfile, oldName, StringComparison.OrdinalIgnoreCase))
             Settings.DefaultProfile = newName;
+        Settings.Wheel.Slots = WheelSlots.Rename(Settings.Wheel.Slots, oldName, newName);
 
         bool wasActive = string.Equals(ActiveName, oldName, StringComparison.OrdinalIgnoreCase);
         if (wasActive)
@@ -186,6 +192,7 @@ sealed class ProfileManager : IDisposable
         }
         SaveSettings();
         ProfilesChanged?.Invoke();
+        WheelChanged?.Invoke(Settings.Wheel);
         if (wasActive) ActiveChanged?.Invoke();
     }
 
@@ -197,8 +204,10 @@ sealed class ProfileManager : IDisposable
         Settings.ProcessRules.RemoveAll(r => string.Equals(r.Profile, name, StringComparison.OrdinalIgnoreCase));
         if (string.Equals(Settings.DefaultProfile, name, StringComparison.OrdinalIgnoreCase))
             Settings.DefaultProfile = null;
+        Settings.Wheel.Slots = WheelSlots.Remove(Settings.Wheel.Slots, name);
         SaveSettings();
         ProfilesChanged?.Invoke();
+        WheelChanged?.Invoke(Settings.Wheel);
 
         if (wasActive)
         {
@@ -213,6 +222,46 @@ sealed class ProfileManager : IDisposable
         Settings.DefaultProfile = string.IsNullOrWhiteSpace(edited.DefaultProfile) ? null : edited.DefaultProfile;
         Settings.ProcessRules = edited.Clone().ProcessRules;
         _lastForeground = null; // sprawdź od nowa przy następnym tyknięciu
+        SaveSettings();
+    }
+
+    public void SetWheelSlots(List<string?> slots)
+    {
+        Settings.Wheel.Slots = WheelSlots.Normalize(slots, Store.Find);
+        SaveSettings();
+        WheelChanged?.Invoke(Settings.Wheel);
+    }
+
+    public static string IconsDir(ProfileStore store) => Path.Combine(store.Dir, "icons");
+
+    /// <summary>Sloty koła do narysowania: etykieta i ikona z pliku profilu, oznaczenie aktywnego.</summary>
+    public List<WheelItem> WheelItems(IReadOnlyList<string?>? slots = null)
+    {
+        var items = new List<WheelItem>();
+        foreach (var slot in slots ?? Settings.Wheel.Slots)
+        {
+            var name = slot == null ? null : Store.Find(slot);
+            if (name == null)
+            {
+                items.Add(WheelItem.EmptySlot);
+                continue;
+            }
+            var raw = ConfigLoader.LoadRaw(Store.PathOf(name), new List<string>(), out _);
+            items.Add(new WheelItem(name, WheelLabels.For(name, raw?.WheelLabel), raw?.WheelIcon,
+                string.Equals(name, ActiveName, StringComparison.OrdinalIgnoreCase)));
+        }
+        return items;
+    }
+
+    public void SetLizardFilterEnabled(bool enabled)
+    {
+        Settings.LizardFilterEnabled = enabled;
+        SaveSettings();
+    }
+
+    public void MarkLizardWizardOffered()
+    {
+        Settings.LizardWizardOffered = true;
         SaveSettings();
     }
 

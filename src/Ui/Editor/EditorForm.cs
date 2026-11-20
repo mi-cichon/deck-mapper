@@ -17,6 +17,8 @@ sealed class EditorForm : Form
     readonly ProfileManager _profiles;
     readonly ControllerWorker _worker;
     readonly KeyboardHost _keyboard;
+    readonly LizardService _lizardService;
+    SwallowPlan _plan;
 
     // edytowany profil (kopia robocza)
     string _profileName = "";
@@ -40,7 +42,7 @@ sealed class EditorForm : Form
 
     // górny pasek
     readonly Label _profilesTitle;
-    readonly DarkButton _tabMapping, _tabSettings, _save, _activate, _close;
+    readonly DarkButton _tabMapping, _tabSettings, _tabWheel, _save, _activate, _close;
 
     // lewa kolumna
     readonly SimpleList _profileList;
@@ -63,16 +65,32 @@ sealed class EditorForm : Form
     readonly List<List<(Control Control, int Height)>> _settingsBlocks = new();
     StickEditor _leftStick = null!, _rightStick = null!;
     TouchSlider _deadzone = null!, _trigger = null!, _padDeadzone = null!;
-    DarkButton _lizard = null!;
+
+    // ustawienia: mysz i lizard
+    readonly List<(Control Control, int Height)> _lizardBlock = new();
+    DarkButton _lizFilter = null!, _lizNoFilter = null!, _lizAuto = null!, _lizWizard = null!;
+    Label _lizHeader = null!, _lizIntro = null!, _lizKeysCaption = null!, _lizStatus = null!;
+    readonly List<RowPanel> _lizKeyRows = new();
+    readonly List<(DarkButton Button, string Key)> _lizKeyButtons = new();
+
+    // koło profili (sloty w settings.json – zapis od razu; etykieta/ikona w profilu – zapis z profilem)
+    readonly Panel _wheelPage;
+    readonly WheelPreview _wheelPreview;
+    readonly SimpleList _wheelSlots;
+    readonly Label _wheelCount, _wheelHelp, _wheelProfileHeader;
+    readonly DarkButton _wheelLess, _wheelMore, _wheelUp, _wheelDown, _wheelClear, _wheelLabel, _wheelIcon, _wheelIconsFolder;
+    int _wheelSelected;
 
     readonly PreviewBar _preview;
 
-    public EditorForm(ProfileManager profiles, ControllerWorker worker, KeyboardHost keyboard, Icon icon)
+    public EditorForm(ProfileManager profiles, ControllerWorker worker, KeyboardHost keyboard, Icon icon, LizardService lizard)
     {
         _profiles = profiles;
         _worker = worker;
         _keyboard = keyboard;
+        _lizardService = lizard;
         _compiled = ConfigLoader.Compile(_raw, new List<string>());
+        _plan = lizard.PlanFor(_compiled.Lizard);
 
         Text = "DeckMapper – edytor profili";
         Icon = icon;
@@ -94,6 +112,8 @@ sealed class EditorForm : Form
         _tabMapping.Click += (_, _) => ShowSettings(false);
         _tabSettings = new DarkButton("Ustawienia");
         _tabSettings.Click += (_, _) => ShowSettings(true);
+        _tabWheel = new DarkButton("Koło");
+        _tabWheel.Click += (_, _) => ShowPage(EditorPage.Wheel);
         _save = new DarkButton("Zapisz") { Kind = DarkButton.Style.Primary };
         _save.Click += (_, _) => Save();
         _activate = new DarkButton("Ustaw jako aktywny");
@@ -163,17 +183,54 @@ sealed class EditorForm : Form
         _settingsPage.Resize += (_, _) => LayoutSettings();
         BuildSettings();
 
+        // --- koło profili ---
+        _wheelPage = new Panel { BackColor = Theme.Back, Visible = false };
+        _wheelPreview = new WheelPreview(ProfileManager.IconsDir(_profiles.Store));
+        _wheelPreview.SlotClicked += TapWheelSlot;
+        _wheelSlots = new SimpleList();
+        _wheelSlots.ItemClicked += TapWheelSlot;
+        _wheelCount = Theme.Label("", Theme.Bold);
+        _wheelCount.TextAlign = ContentAlignment.MiddleCenter;
+        _wheelLess = new DarkButton("−") { Font = Theme.Big };
+        _wheelLess.Click += (_, _) => _profiles.SetWheelSlots(WheelSlots.Resize(_profiles.Settings.Wheel.Slots, _profiles.Settings.Wheel.Slots.Count - 1));
+        _wheelMore = new DarkButton("+") { Font = Theme.Big };
+        _wheelMore.Click += (_, _) => _profiles.SetWheelSlots(WheelSlots.Resize(_profiles.Settings.Wheel.Slots, _profiles.Settings.Wheel.Slots.Count + 1));
+        _wheelUp = new DarkButton("↺ Wcześniej");
+        _wheelUp.Click += (_, _) => MoveWheelSlot(-1);
+        _wheelDown = new DarkButton("↻ Później");
+        _wheelDown.Click += (_, _) => MoveWheelSlot(1);
+        _wheelClear = new DarkButton("Wyczyść slot");
+        _wheelClear.Click += (_, _) => _profiles.SetWheelSlots(WheelSlots.Set(_profiles.Settings.Wheel.Slots, _wheelSelected, null));
+        _wheelHelp = Note("Koło otwiera akcja Specjalne → Koło profili przypisana do przycisku. Trzymaj przycisk, wybierz " +
+                          "slot prawą gałką albo palcem na lewym touchpadzie i puść. Puszczenie w środku = anuluj. " +
+                          "Sloty zapisują się od razu (wspólne dla wszystkich profili).", Theme.TextDim);
+        _wheelProfileHeader = Theme.Label("", Theme.Header, Theme.TextDim);
+        _wheelLabel = new DarkButton("") { TextAlign = ContentAlignment.MiddleLeft };
+        _wheelLabel.Click += (_, _) => EditWheelLabel();
+        _wheelIcon = new DarkButton("") { TextAlign = ContentAlignment.MiddleLeft };
+        _wheelIcon.Click += (_, _) => EditWheelIcon();
+        _wheelIconsFolder = new DarkButton("Folder ikon");
+        _wheelIconsFolder.Click += (_, _) => OpenIconsFolder();
+        _wheelPage.Controls.AddRange(new Control[]
+        {
+            _wheelPreview, _wheelSlots, _wheelCount, _wheelLess, _wheelMore, _wheelUp, _wheelDown, _wheelClear,
+            _wheelHelp, _wheelProfileHeader, _wheelLabel, _wheelIcon, _wheelIconsFolder,
+        });
+        _wheelPage.Resize += (_, _) => LayoutWheelPage();
+        _profiles.WheelChanged += OnWheelChanged;
+
         _preview = new PreviewBar();
 
         Controls.AddRange(new Control[]
         {
             _profilesTitle, _tabMapping, _tabSettings, _save, _activate, _close,
             _profileList, _add, _duplicate, _rename, _delete, _autoSwitch,
-            _mappingPage, _settingsPage, _preview,
+            _tabWheel, _mappingPage, _settingsPage, _wheelPage, _preview,
         });
 
         _profiles.ProfilesChanged += OnProfilesChanged;
         _profiles.ActiveChanged += OnProfilesChanged;
+        _lizardService.Changed += OnLizardChanged;
 
         _timer = new Timer { Interval = 33 };
         _timer.Tick += (_, _) => PollController();
@@ -223,9 +280,10 @@ sealed class EditorForm : Form
             b.Bounds = new Rectangle(x, S(4), w, h);
             x -= gap;
         }
-        int tabW = Math.Max(S(100), Math.Min(S(170), (x - mx - gap) / 2));
+        int tabW = Math.Max(S(90), Math.Min(S(170), (x - mx - gap * 2) / 3));
         _tabMapping.Bounds = new Rectangle(mx, S(4), tabW, h);
         _tabSettings.Bounds = new Rectangle(mx + tabW + gap, S(4), tabW, h);
+        _tabWheel.Bounds = new Rectangle(mx + (tabW + gap) * 2, S(4), tabW, h);
 
         _preview.Bounds = new Rectangle(0, cs.Height - previewH, cs.Width, previewH);
         int bottom = cs.Height - previewH - pad;
@@ -243,6 +301,7 @@ sealed class EditorForm : Form
         var page = new Rectangle(mx, topH + gap, cs.Width - mx - pad, bottom - topH - gap);
         _mappingPage.Bounds = page;
         _settingsPage.Bounds = page;
+        _wheelPage.Bounds = page;
     }
 
     void LayoutMappingPage()
@@ -321,7 +380,19 @@ sealed class EditorForm : Form
     {
         _errors = new List<string>();
         _compiled = ConfigLoader.Compile(_raw, _errors, _profiles.ProfileExists);
+        _plan = _lizardService.PlanFor(_compiled.Lizard);
     }
+
+    /// <summary>Nowa mapa lizarda albo przełącznik filtra w menu – przelicz plakietki i sekcję ustawień.</summary>
+    void OnLizardChanged()
+    {
+        if (IsDisposed) return;
+        _plan = _lizardService.PlanFor(_compiled.Lizard);
+        RefreshAll();
+    }
+
+    /// <summary>Kreator mapy lizarda (z przycisku w ustawieniach albo z menu ikonki, gdy edytor jest otwarty).</summary>
+    public void RunLizardWizard() => LizardWizard.Run(this, _worker, _lizardService);
 
     void MarkDirty()
     {
@@ -337,6 +408,7 @@ sealed class EditorForm : Form
         if (IsDisposed) return;
         RefreshProfileList();
         RefreshHeader();
+        if (_wheelPage.Visible) RefreshWheel(); // aktywny profil / nazwy w slotach
     }
 
     void RefreshProfileList()
@@ -579,22 +651,58 @@ sealed class EditorForm : Form
             (note, noteColor) = ($"nieaktywne – tryb prawej gałki: {ModeName(_compiled.RightStick.Mode)}", Theme.Warning);
 
         Bindings.TryGetValue(key, out var baseAction);
+        var badge = LizardBadgeFor(control);
 
         if (_layer == null || !Layers.TryGetValue(_layer, out var layer))
         {
-            if (KeyCatalog.IsNone(baseAction)) return new("—", RowState.Empty, null, note, noteColor);
+            if (KeyCatalog.IsNone(baseAction)) return new("—", RowState.Empty, null, note, noteColor, badge);
             var text = KeyCatalog.Describe(baseAction);
-            return new(text, text.StartsWith('⚠') ? RowState.Invalid : RowState.Set, null, note, noteColor);
+            return new(text, text.StartsWith('⚠') ? RowState.Invalid : RowState.Set, null, note, noteColor, badge);
         }
 
         if (layer.TryGetValue(key, out var own))
         {
             var text = KeyCatalog.IsNone(own) ? "brak (wyłączone)" : KeyCatalog.Describe(own);
-            return new(text, text.StartsWith('⚠') ? RowState.Invalid : RowState.Overridden, "nadpisane w warstwie", note, noteColor);
+            return new(text, text.StartsWith('⚠') ? RowState.Invalid : RowState.Overridden, "nadpisane w warstwie", note, noteColor, badge);
         }
 
         return new(KeyCatalog.Describe(baseAction), KeyCatalog.IsNone(baseAction) ? RowState.Empty : RowState.Inherited,
-            "z bazy", note, noteColor);
+            "z bazy", note, noteColor, badge);
+    }
+
+    LizardControlStatus LizardStatus(DeckControl control) =>
+        LizardFilterPlanner.StatusOf(control, _lizardService.Map, _plan);
+
+    LizardBadge? LizardBadgeFor(DeckControl control)
+    {
+        var status = LizardStatus(control);
+        string unverified = _lizardService.Map.Verified ? "" : " (Mapa lizarda niezweryfikowana – uruchom „Wykryj mapę lizarda”.)";
+        var name = status.Output.Name;
+        return status.Output.Kind switch
+        {
+            LizardOutputKind.Key when status.Swallowed => new LizardBadge($"lizard: {name}", true, false,
+                $"Lizard wysyła tu {name}, ale filtr go połyka – działa tylko Twoja akcja.{unverified}"),
+            LizardOutputKind.Key => new LizardBadge($"lizard: {name}", false, false,
+                $"Lizard wysyła tu {name} i filtr go NIE połyka – zadziała razem z Twoją akcją. " +
+                $"Zmień w Ustawienia → Mysz i lizard.{unverified}"),
+            LizardOutputKind.MouseButton => new LizardBadge(
+                control == DeckControl.RightPadClick ? $"klik {name} · kursor" : $"sprzętowy klik {name}", false, true,
+                $"Działa zawsze, także w MTA; możesz dodać własny klawisz, ale klik zostanie.{unverified}"),
+            _ => null,
+        };
+    }
+
+    PickerLizardInfo? LizardPickerInfo(DeckControl control)
+    {
+        var status = LizardStatus(control);
+        var name = status.Output.Name;
+        return status.Output.Kind switch
+        {
+            LizardOutputKind.Key when status.Swallowed => new PickerLizardInfo($"Lizard wysyła tu {name}, ale filtr go połyka – zadziała tylko Twoja akcja.", false),
+            LizardOutputKind.Key => new PickerLizardInfo($"⚠ Lizard wysyła tu też {name} i filtr go nie połyka – zadziała razem z Twoją akcją.", true),
+            LizardOutputKind.MouseButton => new PickerLizardInfo($"Sprzętowy klik {name} z lizarda działa zawsze (także w MTA) – Twoja akcja zadziała dodatkowo.", false),
+            _ => null,
+        };
     }
 
     static string ModeName(StickMode mode) => mode switch
@@ -610,7 +718,7 @@ sealed class EditorForm : Form
         _list.Selected = control;
         if (fromController)
         {
-            if (_settingsPage.Visible) ShowSettings(false);
+            if (!_mappingPage.Visible) ShowSettings(false);
             _list.Flash(control);
             _list.EnsureVisible(_list.IndexOf(control));
         }
@@ -641,7 +749,7 @@ sealed class EditorForm : Form
         }
 
         var result = ActionPicker.Pick(this, info.Name, context, current,
-            Layers.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList(), _profiles.Names, _keyboard);
+            Layers.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList(), _profiles.Names, _keyboard, LizardPickerInfo(control));
         if (result != null) SetAction(control, result);
     }
 
@@ -668,6 +776,8 @@ sealed class EditorForm : Form
 
     void RefreshAll()
     {
+        RefreshLizardBlock();
+        if (_wheelPage is { Visible: true }) RefreshWheel();
         _list.Invalidate();
         RefreshActionBar();
         RefreshHeader();
@@ -698,13 +808,262 @@ sealed class EditorForm : Form
         LayoutActionBar();
     }
 
-    void ShowSettings(bool settings)
+    enum EditorPage { Mapping, Settings, Wheel }
+
+    void ShowSettings(bool settings) => ShowPage(settings ? EditorPage.Settings : EditorPage.Mapping);
+
+    void ShowPage(EditorPage page)
     {
-        _settingsPage.Visible = settings;
-        _mappingPage.Visible = !settings;
-        _tabSettings.Checked = settings;
-        _tabMapping.Checked = !settings;
-        if (settings) LayoutSettings();
+        _mappingPage.Visible = page == EditorPage.Mapping;
+        _settingsPage.Visible = page == EditorPage.Settings;
+        _wheelPage.Visible = page == EditorPage.Wheel;
+        _tabMapping.Checked = page == EditorPage.Mapping;
+        _tabSettings.Checked = page == EditorPage.Settings;
+        _tabWheel.Checked = page == EditorPage.Wheel;
+        if (page == EditorPage.Settings) LayoutSettings();
+        if (page == EditorPage.Wheel)
+        {
+            RefreshWheel();
+            LayoutWheelPage();
+        }
+    }
+
+    // ============================================================ koło profili
+
+    void OnWheelChanged(WheelSettings _)
+    {
+        if (!IsDisposed) RefreshWheel();
+    }
+
+    /// <summary>Sloty z settings.json; etykieta/ikona edytowanego profilu z kopii roboczej (także niezapisanej).</summary>
+    List<WheelItem> CurrentWheelItems() =>
+        _profiles.WheelItems().Select(item =>
+            item.Profile != null && string.Equals(item.Profile, _profileName, StringComparison.OrdinalIgnoreCase)
+                ? item with { Label = WheelLabels.For(_profileName, _raw.WheelLabel), Icon = _raw.WheelIcon }
+                : item).ToList();
+
+    void RefreshWheel()
+    {
+        if (_wheelPage == null) return;
+        var slots = _profiles.Settings.Wheel.Slots;
+        _wheelSelected = Math.Clamp(_wheelSelected, 0, slots.Count - 1);
+        var items = CurrentWheelItems();
+        _wheelPreview.SetItems(items, _wheelSelected);
+
+        _wheelSlots.SetItems(items.Select((item, i) => item.Profile == null
+            ? new SimpleList.Item($"{i + 1}. (pusty)", "stuknij, żeby wybrać profil", false, Theme.TextFaint)
+            : i == _wheelSelected
+            ? new SimpleList.Item($"{i + 1}. {item.Profile}", $"w kole: {item.Label}  ·  stuknij ponownie = zmień profil",
+                item.Active, Theme.Accent)
+            : new SimpleList.Item($"{i + 1}. {item.Profile}",
+                $"w kole: {item.Label}{(item.Icon != null ? "  ·  ikona: " + item.Icon : "")}{(item.Active ? "  ·  aktywny" : "")}",
+                item.Active, Theme.TextDim)).ToList());
+        _wheelSlots.SelectedIndex = _wheelSelected;
+
+        _wheelCount.Text = $"Slotów: {slots.Count}";
+        _wheelLess.Enabled = slots.Count > WheelSettings.MinSlots;
+        _wheelMore.Enabled = slots.Count < WheelSettings.MaxSlots;
+        _wheelClear.Enabled = slots[_wheelSelected] != null;
+
+        // etykieta i ikona dotyczą profilu z ZAZNACZONEGO slotu (nie profilu otwartego w edytorze)
+        var slotProfile = SlotProfile();
+        _wheelLabel.Enabled = _wheelIcon.Enabled = slotProfile != null;
+        if (slotProfile == null)
+        {
+            _wheelProfileHeader.Text = $"SLOT {_wheelSelected + 1} JEST PUSTY – STUKNIJ GO, ŻEBY WYBRAĆ PROFIL";
+            _wheelLabel.Text = "Etykieta: —";
+            _wheelIcon.Text = "Ikona: —";
+            return;
+        }
+        var (wheelLabel, wheelIcon) = SlotProfileFields(slotProfile);
+        _wheelProfileHeader.Text = IsEditedProfile(slotProfile)
+            ? $"SLOT {_wheelSelected + 1}: „{slotProfile.ToUpperInvariant()}” (ten profil – zapis przyciskiem Zapisz)"
+            : $"SLOT {_wheelSelected + 1}: „{slotProfile.ToUpperInvariant()}” (zapis od razu do jego pliku)";
+        var label = WheelLabels.For(slotProfile, wheelLabel);
+        _wheelLabel.Text = string.IsNullOrWhiteSpace(wheelLabel)
+            ? $"Etykieta: „{label}” (z nazwy)"
+            : $"Etykieta: „{label}”  ({WheelLabels.Length(wheelLabel)}/{WheelLabels.MaxLength})";
+        _wheelIcon.Text = $"Ikona: {wheelIcon ?? "brak"}";
+    }
+
+    string? SlotProfile()
+    {
+        var slots = _profiles.Settings.Wheel.Slots;
+        return _wheelSelected >= 0 && _wheelSelected < slots.Count && slots[_wheelSelected] is { } name
+            ? _profiles.Store.Find(name)
+            : null;
+    }
+
+    bool IsEditedProfile(string name) => string.Equals(name, _profileName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>wheelLabel/wheelIcon profilu: z kopii roboczej (profil otwarty w edytorze) albo z pliku.</summary>
+    (string? Label, string? Icon) SlotProfileFields(string name)
+    {
+        if (IsEditedProfile(name)) return (_raw.WheelLabel, _raw.WheelIcon);
+        var raw = ConfigLoader.LoadRaw(_profiles.Store.PathOf(name), new List<string>(), out _);
+        return (raw?.WheelLabel, raw?.WheelIcon);
+    }
+
+    /// <summary>Zmiana etykiety/ikony profilu ze slotu: kopia robocza albo od razu zapis innego profilu.</summary>
+    void UpdateSlotProfile(string name, Action<RawConfig> change)
+    {
+        if (IsEditedProfile(name))
+        {
+            change(_raw);
+            MarkDirty();
+            RefreshWheel();
+            return;
+        }
+        var errors = new List<string>();
+        var raw = ConfigLoader.LoadRaw(_profiles.Store.PathOf(name), errors, out _);
+        if (raw == null)
+        {
+            MessageDialog.Info(this, "Nie można zmienić profilu", $"Profil „{name}” ma błąd:\n{string.Join("\n", errors.Take(3))}");
+            return;
+        }
+        ConfigLoader.Normalize(raw);
+        change(raw);
+        if (TryFileOp(() => _profiles.Save(name, raw))) RefreshWheel();
+    }
+
+    /// <summary>Pierwsze stuknięcie zaznacza slot (etykieta/ikona), drugie – albo stuknięcie pustego – wybiera profil.</summary>
+    void TapWheelSlot(int index)
+    {
+        bool pick = index == _wheelSelected || _profiles.Settings.Wheel.Slots.ElementAtOrDefault(index) == null;
+        SelectWheelSlot(index);
+        if (pick) PickWheelProfile(index);
+    }
+
+    void SelectWheelSlot(int index)
+    {
+        _wheelSelected = index;
+        RefreshWheel();
+    }
+
+    void MoveWheelSlot(int delta)
+    {
+        var slots = _profiles.Settings.Wheel.Slots;
+        int target = ((_wheelSelected + delta) % slots.Count + slots.Count) % slots.Count;
+        _profiles.SetWheelSlots(WheelSlots.Move(slots, _wheelSelected, delta));
+        SelectWheelSlot(target);
+    }
+
+    void PickWheelProfile(int slot)
+    {
+        var names = _profiles.Names;
+        var current = _profiles.Settings.Wheel.Slots[slot];
+        var items = new List<SimpleList.Item> { new("(pusty slot)", null, current == null) };
+        items.AddRange(names.Select(n => new SimpleList.Item(n,
+            string.Equals(n, _profiles.ActiveName, StringComparison.OrdinalIgnoreCase) ? "aktywny" : null,
+            string.Equals(n, current, StringComparison.OrdinalIgnoreCase))));
+        int choice = ChoiceDialog.Ask(this, $"Slot {slot + 1} koła", items);
+        if (choice < 0) return;
+        _profiles.SetWheelSlots(WheelSlots.Set(_profiles.Settings.Wheel.Slots, slot, choice == 0 ? null : names[choice - 1]));
+    }
+
+    void EditWheelLabel()
+    {
+        if (SlotProfile() is not { } name) return;
+        var (current, _) = SlotProfileFields(name);
+        var value = TextPrompt.Ask(this, _keyboard, $"Etykieta w kole – {name}",
+            $"Maks. {WheelLabels.MaxLength} znaków (emoji = 1). Puste = pierwsze {WheelLabels.MaxLength} znaków nazwy profilu.",
+            current ?? "", WheelLabels.Validate,
+            text => $"{WheelLabels.Length(text.Trim())}/{WheelLabels.MaxLength}" +
+                    (text.Trim().Length == 0 ? $" – będzie „{WheelLabels.For(name, null)}”" : ""));
+        if (value == null) return;
+        UpdateSlotProfile(name, raw => raw.WheelLabel = value.Length == 0 ? null : value);
+    }
+
+    void EditWheelIcon()
+    {
+        if (SlotProfile() is not { } name) return;
+        var (_, currentIcon) = SlotProfileFields(name);
+        var dir = ProfileManager.IconsDir(_profiles.Store);
+        var pngs = new List<string>();
+        try
+        {
+            if (System.IO.Directory.Exists(dir))
+                pngs = System.IO.Directory.GetFiles(dir, "*.png").Select(System.IO.Path.GetFileName).OfType<string>()
+                    .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        catch (Exception e)
+        {
+            Log.Error("Lista ikon", e);
+        }
+
+        var items = new List<SimpleList.Item>
+        {
+            new("Brak ikony", null, currentIcon == null),
+            new("Emoji albo znak…", "wpisz np. 🚗 (klawiatura Windows: Win + .)"),
+        };
+        items.AddRange(pngs.Select(p => new SimpleList.Item(p, "profiles/icons", string.Equals(p, currentIcon, StringComparison.OrdinalIgnoreCase))));
+        if (pngs.Count == 0) items.Add(new SimpleList.Item("(brak plików PNG w profiles/icons)", "wrzuć tam PNG i otwórz to okno jeszcze raz"));
+
+        int choice = ChoiceDialog.Ask(this, $"Ikona w kole – {name}", items);
+        if (choice < 0) return;
+        string? icon;
+        if (choice == 0) icon = null;
+        else if (choice == 1)
+        {
+            var emoji = TextPrompt.Ask(this, _keyboard, $"Ikona w kole – {name}", "Emoji albo krótki znak.",
+                currentIcon is { } i && !i.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? i : "",
+                v => WheelLabels.Length(v) > 2 ? "Najwyżej 2 znaki." : null);
+            if (emoji == null) return;
+            icon = emoji.Length == 0 ? null : emoji;
+        }
+        else if (choice - 2 < pngs.Count) icon = pngs[choice - 2];
+        else return;
+        WheelRenderer.ClearIconCache();
+        UpdateSlotProfile(name, raw => raw.WheelIcon = icon);
+    }
+
+    void OpenIconsFolder()
+    {
+        try
+        {
+            var dir = ProfileManager.IconsDir(_profiles.Store);
+            System.IO.Directory.CreateDirectory(dir);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{dir}\"") { UseShellExecute = true });
+        }
+        catch (Exception e)
+        {
+            Log.Error("Folder ikon", e);
+        }
+    }
+
+    void LayoutWheelPage()
+    {
+        if (!_wheelPage.Visible) return;
+        var size = _wheelPage.ClientSize;
+        int gap = S(8), h = S(56);
+        int previewSize = Math.Max(S(200), Math.Min(size.Height, (int)(size.Width * 0.48)));
+        _wheelPreview.Bounds = new Rectangle(0, 0, previewSize, previewSize);
+
+        int x = previewSize + S(16), w = Math.Max(S(200), size.Width - x);
+        int y = 0;
+        _wheelLess.Bounds = new Rectangle(x, y, S(64), h);
+        _wheelCount.Bounds = new Rectangle(x + S(64) + gap, y, w - S(128) - gap * 2, h);
+        _wheelMore.Bounds = new Rectangle(x + w - S(64), y, S(64), h);
+        y += h + gap;
+
+        int bottomBlock = S(26) + (h + gap) * 2 + S(84);
+        int listH = Math.Max(S(120), size.Height - y - (h + gap) - bottomBlock - gap);
+        _wheelSlots.Bounds = new Rectangle(x, y, w, listH);
+        y += listH + gap;
+        int bw = (w - gap * 2) / 3;
+        _wheelUp.Bounds = new Rectangle(x, y, bw, h);
+        _wheelDown.Bounds = new Rectangle(x + bw + gap, y, bw, h);
+        _wheelClear.Bounds = new Rectangle(x + (bw + gap) * 2, y, w - (bw + gap) * 2, h);
+        y += h + gap;
+
+        _wheelProfileHeader.Bounds = new Rectangle(x, y, w, S(26));
+        y += S(26);
+        _wheelLabel.Bounds = new Rectangle(x, y, w, h);
+        y += h + gap;
+        _wheelIcon.Bounds = new Rectangle(x, y, w - S(150) - gap, h);
+        _wheelIconsFolder.Bounds = new Rectangle(x + w - S(150), y, S(150), h);
+        y += h + gap;
+        _wheelHelp.Bounds = new Rectangle(x, y, w, Math.Max(S(40), size.Height - y));
     }
 
     // ============================================================ ustawienia profilu
@@ -731,18 +1090,8 @@ sealed class EditorForm : Form
         _trigger = AddSlider(general, "Próg wciśnięcia L2 / R2", 0.05, 1, 0.01, "0.00", v => _raw.TriggerThreshold = v);
         _padDeadzone = AddSlider(general, "Martwa strefa lewego touchpada (kierunki)", 0, 0.9, 0.01, "0.00", v => _raw.LeftPadDeadzone = v);
 
-        _lizard = new DarkButton("Wyłącz klawisze lizard mode") { TextAlign = ContentAlignment.MiddleLeft };
-        _lizard.Click += (_, _) =>
-        {
-            _raw.DisableLizardButtons = !_raw.DisableLizardButtons;
-            UpdateSettingsState();
-            MarkDirty();
-        };
-        general.Add((_lizard, S(56)));
-        general.Add((Note("Kontroler sam wysyła w lizard mode np. Enter (A), Esc (B) i strzałki (d-pad). Włączenie tej opcji " +
-                          "je wyłącza, ale może też wyłączyć kliki R2/L2 – sprawdź w grze. Lizard mode (kursor na prawym " +
-                          "touchpadzie) zostaje.", Theme.TextDim), S(84)));
         _settingsBlocks.Add(general);
+        BuildLizardBlock();
 
         foreach (var block in _settingsBlocks)
             foreach (var (control, _) in block)
@@ -751,6 +1100,136 @@ sealed class EditorForm : Form
                 if (control is Label) EnableDragScroll(control);
             }
         EnableDragScroll(_settingsContent);
+    }
+
+    // ---------- mysz i lizard ----------
+
+    void BuildLizardBlock()
+    {
+        _lizHeader = Header("Mysz i lizard");
+        _lizIntro = Note("Mysz zostaje sprzętowa (lizard mode): prawy touchpad = kursor, R2 / L2 / klik prawego padu = kliki. " +
+                         "Tylko taką mysz MTA przyjmuje na serwerze.", Theme.TextDim);
+        _lizFilter = new DarkButton("Filtruj klawisze lizarda (zalecane)")
+        {
+            SubText = "mysz działa, A/B/d-pad nie wysyłają Enter/Esc/strzałek – mapujesz sam",
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+        _lizFilter.Click += (_, _) => SetLizardFilter(true);
+        _lizNoFilter = new DarkButton("Lizard bez filtra")
+        {
+            SubText = "przyciski dodatkowo wysyłają swoje klawisze (np. Enter pod A)",
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+        _lizNoFilter.Click += (_, _) => SetLizardFilter(false);
+        _lizKeysCaption = Theme.Label("Połykane klawisze (sprzętowe, z lizarda):", Theme.Small, Theme.TextDim);
+        _lizAuto = new DarkButton("Wszystkie z mapy (auto)") { SubText = "także nowe po ponownym wykryciu mapy" };
+        _lizAuto.Click += (_, _) => SetLizardAuto(!_compiled.Lizard.SwallowAuto);
+        _lizStatus = Note("", Theme.TextDim);
+        _lizWizard = new DarkButton("Wykryj mapę lizarda…") { SubText = "wciśnij po kolei przyciski Decka" };
+        _lizWizard.Click += (_, _) => RunLizardWizard();
+
+        _settingsBlocks.Add(_lizardBlock);
+        foreach (var c in new Control[] { _lizHeader, _lizIntro, _lizFilter, _lizNoFilter, _lizKeysCaption, _lizAuto, _lizStatus, _lizWizard })
+            _settingsContent.Controls.Add(c);
+        EnableDragScroll(_lizIntro);
+        EnableDragScroll(_lizStatus);
+        EnableDragScroll(_lizKeysCaption);
+    }
+
+    void SetLizardFilter(bool filter)
+    {
+        if (_raw.Lizard!.FilterKeys == filter) return;
+        _raw.Lizard.FilterKeys = filter;
+        MarkDirty();
+    }
+
+    void SetLizardAuto(bool auto)
+    {
+        // auto → jawna lista wszystkich klawiszy z mapy (to samo działanie, ale nowe klawisze nie dojdą same)
+        _raw.Lizard!.Swallow = auto ? RawSwallow.Auto() : RawSwallow.List(_lizardService.Map.Keys.Select(k => k.Name));
+        MarkDirty();
+    }
+
+    void ToggleSwallowKey(string key)
+    {
+        var next = LizardFilterPlanner.Toggle(_compiled.Lizard, _lizardService.Map, key);
+        _raw.Lizard!.Swallow = next.SwallowAuto ? RawSwallow.Auto() : RawSwallow.List(next.SwallowKeys);
+        MarkDirty();
+    }
+
+    /// <summary>Stan sekcji „Mysz i lizard” z edytowanego profilu, mapy i globalnego przełącznika.</summary>
+    void RefreshLizardBlock()
+    {
+        if (_lizFilter == null) return;
+        var settings = _compiled.Lizard;
+        var map = _lizardService.Map;
+
+        _lizFilter.Checked = settings.FilterKeys;
+        _lizNoFilter.Checked = !settings.FilterKeys;
+        _lizAuto.Checked = settings.FilterKeys && settings.SwallowAuto;
+        _lizAuto.Enabled = settings.FilterKeys;
+
+        // klawisze: z mapy + spoza mapy wpisane ręcznie w profilu (żeby dało się je odznaczyć)
+        var keys = map.Keys.Select(k => k.Name).ToList();
+        if (!settings.SwallowAuto)
+            foreach (var k in settings.SwallowKeys)
+                if (!keys.Any(m => LizardFilterPlanner.SameKey(m, k))) keys.Add(k);
+
+        if (!keys.SequenceEqual(_lizKeyButtons.Select(b => b.Key)))
+        {
+            foreach (var row in _lizKeyRows)
+            {
+                _settingsContent.Controls.Remove(row);
+                row.Dispose();
+            }
+            _lizKeyRows.Clear();
+            _lizKeyButtons.Clear();
+            for (int i = 0; i < keys.Count; i += 3)
+            {
+                var row = new RowPanel();
+                foreach (var key in keys.Skip(i).Take(3))
+                {
+                    var b = new DarkButton(key);
+                    b.Click += (_, _) => ToggleSwallowKey(key);
+                    row.Controls.Add(b);
+                    _lizKeyButtons.Add((b, key));
+                }
+                _lizKeyRows.Add(row);
+                _settingsContent.Controls.Add(row);
+            }
+        }
+
+        foreach (var (button, key) in _lizKeyButtons)
+        {
+            bool swallowed = settings.SwallowAuto || settings.SwallowKeys.Any(k => LizardFilterPlanner.SameKey(k, key));
+            button.Checked = settings.FilterKeys && swallowed;
+            button.Enabled = settings.FilterKeys;
+            button.Text = (button.Checked ? "✓ " : "") + key;
+        }
+
+        var lines = new List<string>
+        {
+            map.Verified
+                ? $"Mapa lizarda: wykryta {map.DetectedAt:yyyy-MM-dd HH:mm}."
+                : "Mapa lizarda: wbudowana, NIEZWERYFIKOWANA (Enter, Esc, strzałki) – uruchom „Wykryj mapę lizarda”.",
+        };
+        if (!_lizardService.GlobalEnabled)
+            lines.Add("Filtr jest wyłączony w menu ikonki (np. przez klawiaturę USB) – te ustawienia zadziałają po jego włączeniu.");
+        lines.AddRange(_plan.Warnings.Select(w => "⚠ " + w));
+        _lizStatus.Text = string.Join("\n", lines);
+        _lizStatus.ForeColor = !_lizardService.GlobalEnabled || _plan.Warnings.Count > 0 || !map.Verified ? Theme.Warning : Theme.TextDim;
+
+        _lizardBlock.Clear();
+        _lizardBlock.Add((_lizHeader, S(40)));
+        _lizardBlock.Add((_lizIntro, S(72)));
+        _lizardBlock.Add((_lizFilter, S(64)));
+        _lizardBlock.Add((_lizNoFilter, S(64)));
+        _lizardBlock.Add((_lizKeysCaption, S(26)));
+        _lizardBlock.Add((_lizAuto, S(60)));
+        foreach (var row in _lizKeyRows) _lizardBlock.Add((row, S(52)));
+        _lizardBlock.Add((_lizStatus, S(44) * lines.Count + S(8)));
+        _lizardBlock.Add((_lizWizard, S(60)));
+        LayoutSettings();
     }
 
     StickEditor BuildStick(string title, Func<RawStick> stick, string listName)
@@ -839,14 +1318,12 @@ sealed class EditorForm : Form
             var name = (string)editor.Note.Tag!;
             (editor.Note.Text, editor.Note.ForeColor) = mode switch
             {
-                "mouse" => ("Gałka porusza kursorem (SendInput). W MTA to NIE działa – MTA ignoruje programową mysz; " +
-                            "kamera zostaje na prawym touchpadzie (lizard mode).", Theme.Warning),
+                "mouse" => ("Gałka porusza kursorem (SendInput) – NIE działa w MTA na serwerze, MTA przyjmuje tylko " +
+                            "sprzętową mysz. Użyj sprzętowej myszy lizarda (prawy touchpad).", Theme.Warning),
                 "keys" => ($"Kierunki przypisujesz na liście: {name} ↑ ↓ ← →.", Theme.TextDim),
                 _ => ("Gałka nic nie wysyła.", Theme.TextDim),
             };
         }
-        _lizard.Checked = _raw.DisableLizardButtons;
-        _lizard.Text = (_raw.DisableLizardButtons ? "✓  " : "") + "Wyłącz klawisze lizard mode";
     }
 
     void LayoutSettings()
@@ -904,6 +1381,11 @@ sealed class EditorForm : Form
             _preview.Set("Kontroler niepodłączony – wybór wciśnięciem i podgląd nie działają.", new List<string>());
             return;
         }
+
+        // podgląd koła na żywo: prawa gałka / lewy touchpad podświetlają sektor jak w grze
+        if (_wheelPage.Visible)
+            _wheelPreview.LiveSector = WheelSelector.Select(_state.RightX, _state.RightY, _state.LeftPadTouched,
+                _state.LeftPadX, _state.LeftPadY, _profiles.Settings.Wheel.Slots.Count, _profiles.Settings.Wheel);
 
         Mapper.Evaluate(_compiled, _state, _now);
         long t = Environment.TickCount64;
@@ -990,6 +1472,8 @@ sealed class EditorForm : Form
         _timer.Dispose();
         _profiles.ProfilesChanged -= OnProfilesChanged;
         _profiles.ActiveChanged -= OnProfilesChanged;
+        _lizardService.Changed -= OnLizardChanged;
+        _profiles.WheelChanged -= OnWheelChanged;
         base.OnFormClosed(e);
     }
 }

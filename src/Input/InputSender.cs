@@ -3,8 +3,6 @@ using System.Runtime.InteropServices;
 
 namespace DeckMapper;
 
-enum MouseButton { Left, Right, Middle, X1, X2 }
-
 /// <summary>Wysyłanie klawiatury/myszy przez SendInput. Klawisze idą jako scancode'y.</summary>
 static class InputSender
 {

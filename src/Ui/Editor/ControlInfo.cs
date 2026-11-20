@@ -6,7 +6,7 @@ namespace DeckMapper;
 /// <summary>Czytelne nazwy, symbole i grupy kontrolek Decka do edytora.</summary>
 sealed record ControlInfo(DeckControl Control, string Symbol, string Name, string Group, string? Note = null)
 {
-    /// <summary>R2/L2 i klik prawego padu w lizard mode klikają myszą – do wyboru trzeba je przytrzymać.</summary>
+    /// <summary>R2/L2 i klik prawego padu: lizard klika nimi myszą (sprzętowo) – do wyboru trzeba je przytrzymać.</summary>
     public bool LongPressToSelect => Control is DeckControl.LT or DeckControl.RT or DeckControl.RightPadClick;
 
     public bool IsLeftStickDirection => Control is DeckControl.LeftStickUp or DeckControl.LeftStickDown
@@ -24,8 +24,8 @@ sealed record ControlInfo(DeckControl Control, string Symbol, string Name, strin
 
         new(DeckControl.LB, "LB", "LB (lewy bumper)", "Bumpery / triggery", "L1"),
         new(DeckControl.RB, "RB", "RB (prawy bumper)", "Bumpery / triggery", "R1"),
-        new(DeckControl.LT, "L2", "L2 / LT (lewy trigger)", "Bumpery / triggery", "lizard mode: prawy klik myszy – do wyboru przytrzymaj"),
-        new(DeckControl.RT, "R2", "R2 / RT (prawy trigger)", "Bumpery / triggery", "lizard mode: lewy klik myszy – do wyboru przytrzymaj"),
+        new(DeckControl.LT, "L2", "L2 / LT (lewy trigger)", "Bumpery / triggery", "do wyboru przytrzymaj"),
+        new(DeckControl.RT, "R2", "R2 / RT (prawy trigger)", "Bumpery / triggery", "do wyboru przytrzymaj"),
 
         new(DeckControl.L4, "L4", "L4 – tył, lewy górny", "Tylne"),
         new(DeckControl.L5, "L5", "L5 – tył, lewy dolny", "Tylne"),
@@ -58,7 +58,7 @@ sealed record ControlInfo(DeckControl Control, string Symbol, string Name, strin
         new(DeckControl.Menu, "≡", "Menu ≡", "Systemowe", "Start"),
         new(DeckControl.Steam, "S", "Steam", "Systemowe"),
         new(DeckControl.QuickAccess, "…", "Quick Access …", "Systemowe"),
-        new(DeckControl.RightPadClick, "◎", "Prawy touchpad – klik", "Systemowe", "lizard mode: lewy klik myszy – do wyboru przytrzymaj"),
+        new(DeckControl.RightPadClick, "◎", "Prawy touchpad – klik", "Systemowe", "do wyboru przytrzymaj"),
     };
 
     static readonly Dictionary<DeckControl, ControlInfo> ByControl = All.ToDictionary(i => i.Control);

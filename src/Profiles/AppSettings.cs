@@ -21,6 +21,15 @@ sealed class AppSettings
 
     public List<ProcessRule> ProcessRules { get; set; } = new();
 
+    /// <summary>Globalny wyłącznik filtra klawiszy lizarda (np. przy podłączonej klawiaturze USB).</summary>
+    public bool LizardFilterEnabled { get; set; } = true;
+
+    /// <summary>Czy już zaproponowano kreator „Wykryj mapę lizarda” (propozycja tylko przy pierwszym uruchomieniu).</summary>
+    public bool LizardWizardOffered { get; set; }
+
+    /// <summary>Koło szybkiego wyboru profilu (akcja @ProfileWheel). Startuje puste.</summary>
+    public WheelSettings Wheel { get; set; } = new();
+
     static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = true,
@@ -40,6 +49,7 @@ sealed class AppSettings
                 var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), Options);
                 if (settings != null)
                 {
+                    settings.Wheel ??= new WheelSettings();
                     settings.ProcessRules = (settings.ProcessRules ?? new())
                         .Where(r => r != null && !string.IsNullOrWhiteSpace(r.Process)).ToList();
                     return settings;
@@ -75,6 +85,9 @@ sealed class AppSettings
         AutoSwitch = AutoSwitch,
         DefaultProfile = DefaultProfile,
         ProcessRules = ProcessRules.Select(r => new ProcessRule { Process = r.Process, Profile = r.Profile }).ToList(),
+        LizardFilterEnabled = LizardFilterEnabled,
+        LizardWizardOffered = LizardWizardOffered,
+        Wheel = Wheel.Clone(),
     };
 }
 

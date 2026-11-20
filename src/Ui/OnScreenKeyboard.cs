@@ -73,6 +73,34 @@ sealed class OnScreenKeyboard : Form
 
     protected override bool ShowWithoutActivation => true;
 
+    /// <summary>
+    /// WS_EX_NOACTIVATE nie wystarcza przy DOTYKU: Windows wysyła WM_POINTERACTIVATE / WM_MOUSEACTIVATE, a domyślna
+    /// odpowiedź to „aktywuj” – klawiatura zabierała wtedy fokus polu tekstowemu (np. zmiana nazwy profilu w edytorze)
+    /// i grze. Odpowiadamy „nie aktywuj” na oba (także w KeyCap, bo komunikat trafia najpierw do klikniętego dziecka).
+    /// </summary>
+    internal static bool TryRefuseActivation(ref Message m)
+    {
+        const int WmMouseActivate = 0x0021, MaNoActivate = 3;
+        const int WmPointerActivate = 0x024B, PaNoActivate = 3;
+        switch (m.Msg)
+        {
+            case WmMouseActivate:
+                m.Result = (IntPtr)MaNoActivate;
+                return true;
+            case WmPointerActivate:
+                m.Result = (IntPtr)PaNoActivate;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (TryRefuseActivation(ref m)) return;
+        base.WndProc(ref m);
+    }
+
     protected override CreateParams CreateParams
     {
         get
