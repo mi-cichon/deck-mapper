@@ -25,6 +25,34 @@ sealed class KeyCap : Control
 
     public event EventHandler? Pressed;
 
+    const int WmPointerDown = 0x0246, WmPointerUp = 0x0247, WmPointerCaptureChanged = 0x024C;
+
+    protected override void WndProc(ref Message m)
+    {
+        if (OnScreenKeyboard.TryRefuseActivation(ref m)) return; // dotyk klawisza nie może aktywować klawiatury
+
+        // Dotyk obsługujemy wprost (WM_POINTER*), a nie przez „promocję” do komunikatów myszy: gdy gra (MTA) ma
+        // pierwszy plan i trzyma kursor (przechwycenie / ClipCursor), zastępczy klik myszy z dotyku trafiał do gry,
+        // a nie w klawisz. WM_POINTER idzie zawsze do okna pod palcem. Obsłużony = brak promocji (brak podwójnego
+        // wciśnięcia). Mysz/trackpad dalej idą przez OnMouseDown.
+        switch (m.Msg)
+        {
+            case WmPointerDown:
+                _pressed = true;
+                Invalidate();
+                Pressed?.Invoke(this, EventArgs.Empty);
+                m.Result = IntPtr.Zero;
+                return;
+            case WmPointerUp:
+            case WmPointerCaptureChanged:
+                _pressed = false;
+                Invalidate();
+                m.Result = IntPtr.Zero;
+                return;
+        }
+        base.WndProc(ref m);
+    }
+
     /// <summary>Podświetlenie, np. włączony Shift.</summary>
     public bool Active
     {

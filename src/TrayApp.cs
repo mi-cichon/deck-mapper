@@ -16,6 +16,11 @@ sealed class TrayApp : ApplicationContext
     readonly ToolStripMenuItem _statusItem;
     readonly ToolStripMenuItem _pauseItem;
     readonly ToolStripMenuItem _profilesItem;
+    readonly ToolStripMenuItem _filterItem;
+    readonly LizardService _lizard;
+    readonly Timer _keyboardCheck;
+    readonly WheelOverlay _wheel;
+    bool _keyboardWarned;
     readonly Mapper _mapper;
     readonly ControllerWorker _worker;
     readonly ProfileManager _profiles;
@@ -38,11 +43,22 @@ sealed class TrayApp : ApplicationContext
         _worker = new ControllerWorker(_mapper);
         _profiles.ConfigLoaded += _worker.ApplyConfig;
 
+        _lizard = new LizardService(_worker, _profiles);
+        _lizard.Initialize(config);
+        _profiles.ConfigLoaded += _lizard.ApplyProfile;
+        _lizard.Changed += UpdateStatus;
+
+        // koło profili: logika w wątku kontrolera (Mapper), tu tylko nakładka i zmiana profilu
+        _wheel = new WheelOverlay(ProfileManager.IconsDir(_profiles.Store));
+        _worker.SetWheel(_profiles.Settings.Wheel);
+        _profiles.WheelChanged += _worker.SetWheel;
+
         _statusItem = new ToolStripMenuItem("Kontroler: szukam…") { Enabled = false };
         _pauseItem = new ToolStripMenuItem("Wstrzymaj mapowanie", null, (_, _) => _worker.RequestTogglePause());
         _profilesItem = new ToolStripMenuItem("Profil");
         _profilesItem.DropDownItems.Add(new ToolStripMenuItem("…")); // żeby strzałka podmenu była widoczna od razu
         _profilesItem.DropDownOpening += (_, _) => BuildProfilesMenu();
+        _filterItem = new ToolStripMenuItem("Filtr lizarda", null, (_, _) => _lizard.SetGlobalEnabled(!_lizard.GlobalEnabled));
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
@@ -52,6 +68,9 @@ sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Klawiatura ekranowa", null, (_, _) => _keyboard.Toggle());
         menu.Items.Add(_pauseItem);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(_filterItem);
+        menu.Items.Add("Wykryj mapę lizarda…", null, (_, _) => RunLizardWizard());
         menu.Items.Add("Podgląd kontrolera", null, (_, _) => ShowDebug());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Edytuj plik profilu (Notatnik)…", null, (_, _) => EditProfileFile());
@@ -83,6 +102,19 @@ sealed class TrayApp : ApplicationContext
             else _profiles.Activate(name);
         });
         _mapper.EditorRequested += () => OnUi(ShowEditor);
+        _mapper.WheelOpened += slots => OnUi(() => _wheel.Open(_profiles.WheelItems(slots)));
+        _mapper.WheelSectorChanged += sector => OnUi(() => _wheel.SetSector(sector));
+        _mapper.WheelClosed += profile => OnUi(() =>
+        {
+            if (profile == null)
+            {
+                _wheel.CloseWheel();
+                return;
+            }
+            _wheel.Toast(profile);
+            if (!string.Equals(profile, _profiles.ActiveName, StringComparison.OrdinalIgnoreCase))
+                _profiles.Activate(profile, message: null); // napis na środku ekranu zamiast dymka
+        });
         _mapper.PausedChanged += paused => OnUi(() =>
         {
             _pauseItem.Checked = paused;
@@ -92,6 +124,14 @@ sealed class TrayApp : ApplicationContext
 
         _worker.Start();
         UpdateStatus();
+
+        // klawiatura USB: filtr połyka też jej Enter/Esc/strzałki – jednorazowy dymek
+        _keyboardCheck = new Timer { Interval = 15_000 };
+        _keyboardCheck.Tick += (_, _) => CheckExternalKeyboard();
+        _keyboardCheck.Start();
+        OnUi(CheckExternalKeyboard);
+
+        if (!_profiles.Settings.LizardWizardOffered && !_lizard.HasMapFile) OnUi(OfferLizardWizard);
 
         if (errors.Count > 0)
         {
@@ -136,6 +176,41 @@ sealed class TrayApp : ApplicationContext
         { Checked = _profiles.Settings.AutoSwitch });
     }
 
+    void RunLizardWizard()
+    {
+        if (_editor is { IsDisposed: false })
+        {
+            _editor.Activate();
+            _editor.RunLizardWizard();
+            return;
+        }
+        LizardWizard.Run(null, _worker, _lizard);
+    }
+
+    void OfferLizardWizard()
+    {
+        _profiles.MarkLizardWizardOffered();
+        int choice = MessageDialog.Ask(null, "Mapa lizarda",
+            "DeckMapper połyka klawisze, które kontroler sam wysyła w lizard mode (np. Enter pod A), " +
+            "a mysz z touchpada zostawia. Teraz używa wbudowanej, niesprawdzonej listy (Enter, Esc, strzałki).\n\n" +
+            "Wykryć dokładną mapę? Zajmie to minutę: wciśniesz po kolei każdy przycisk Decka. " +
+            "Później: menu ikonki → Wykryj mapę lizarda.",
+            ("Wykryj teraz", DarkButton.Style.Primary), ("Później", DarkButton.Style.Normal));
+        if (choice == 0) RunLizardWizard();
+    }
+
+    void CheckExternalKeyboard()
+    {
+        if (_keyboardWarned || !_lizard.Plan.Active) return;
+        var external = RawInputDevices.KeyboardPaths().Where(KeyboardDevices.IsExternalKeyboard).ToList();
+        if (external.Count == 0) return;
+        _keyboardWarned = true;
+        Log.Info("Wykryto klawiaturę USB/Bluetooth: " + string.Join(" | ", external));
+        _tray.ShowBalloonTip(10000, "Wykryto klawiaturę USB",
+            "Filtr lizarda połyka też jej Enter/Esc/strzałki. Wyłącz filtr w menu ikonki, jeśli przeszkadza.",
+            ToolTipIcon.Warning);
+    }
+
     void UpdateStatus()
     {
         string status = _worker.Connected ? "Kontroler: połączony" : "Kontroler: szukam…";
@@ -144,7 +219,15 @@ sealed class TrayApp : ApplicationContext
         _statusItem.Text = status;
         _profilesItem.Text = $"Profil: {_profiles.ActiveName}";
 
-        var tip = $"DeckMapper – {_profiles.ActiveName} – {status.Replace("Kontroler: ", "")}";
+        var plan = _lizard.Plan;
+        string filter = plan.Active ? "włączony" : "wyłączony";
+        _filterItem.Text = $"Filtr lizarda: {filter}" + (plan.Active || !_lizard.GlobalEnabled ? "" : $" ({plan.Reason})");
+        _filterItem.Checked = _lizard.GlobalEnabled;
+        _filterItem.ToolTipText = _lizard.GlobalEnabled
+            ? $"Kliknij, żeby wyłączyć (np. przy klawiaturze USB). {plan.Reason}. Mapa: {_lizard.MapSource}."
+            : "Kliknij, żeby włączyć: klawisze lizarda (Enter pod A itd.) będą połykane, mysz z touchpada zostaje.";
+
+        var tip = $"DeckMapper – {_profiles.ActiveName} – {status.Replace("Kontroler: ", "")} – filtr {(plan.Active ? "wł." : "wył.")}";
         _tray.Text = tip.Length > 63 ? tip[..62] + "…" : tip; // NotifyIcon.Text ma limit długości
     }
 
@@ -152,7 +235,7 @@ sealed class TrayApp : ApplicationContext
     {
         if (_editor == null || _editor.IsDisposed)
         {
-            _editor = new EditorForm(_profiles, _worker, _keyboard, _icon);
+            _editor = new EditorForm(_profiles, _worker, _keyboard, _icon, _lizard);
             _editor.FormClosed += (_, _) =>
             {
                 _worker.SetSuspended(false);
@@ -202,8 +285,11 @@ sealed class TrayApp : ApplicationContext
     protected override void ExitThreadCore()
     {
         _editor?.Dispose();
+        _keyboardCheck.Dispose();
+        _wheel.Dispose();
         _profiles.Dispose();
-        _worker.Dispose();
+        _lizard.Dispose();   // najpierw zdejmij hook
+        _worker.Dispose();   // worker przy zamknięciu przywraca domyślny lizard (0x85 + 0x8E)
         _keyboard.Dispose();
         _debug?.Dispose();
         _tray.Visible = false;

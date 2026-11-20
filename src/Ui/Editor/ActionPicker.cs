@@ -85,6 +85,9 @@ sealed class KeyboardGrid : Control
     }
 }
 
+/// <summary>Informacja o lizardzie dla kontrolki w pickerze. Warning = lizard wyśle tu klawisz razem z Twoją akcją.</summary>
+sealed record PickerLizardInfo(string Text, bool Warning);
+
 /// <summary>
 /// Wybór akcji bez pisania: klawiatura (z modyfikatorami), mysz, akcje specjalne, tekst.
 /// Zwraca tekst akcji w formacie pliku profilu ("" = brak).
@@ -105,7 +108,7 @@ sealed class ActionPicker : DarkDialog
     string? _special;   // "@Keyboard", "@Layer:alt"...
     string _raw = "";   // akcja, której picker nie umie rozłożyć (np. "W+D") – zostaje bez zmian
 
-    readonly Label _title, _subtitle, _current, _mouseNote;
+    readonly Label _title, _subtitle, _current, _mouseNote, _lizardNote;
     readonly DarkButton _ctrlButton, _shiftButton, _altButton;
     readonly Dictionary<Page, DarkButton> _tabs = new();
     readonly Dictionary<Page, Panel> _pages = new();
@@ -118,7 +121,7 @@ sealed class ActionPicker : DarkDialog
     bool _loading;
 
     ActionPicker(string controlName, string context, string? initial, IReadOnlyList<string> layers, IReadOnlyList<string> profiles,
-        KeyboardHost keyboard)
+        KeyboardHost keyboard, PickerLizardInfo? lizard)
     {
         _keyboard = keyboard;
         _keyboardWasVisible = keyboard.Visible;
@@ -131,7 +134,10 @@ sealed class ActionPicker : DarkDialog
         _title = Theme.Label(controlName, Theme.Title);
         _subtitle = Theme.Label(context, Theme.Small, Theme.TextDim);
         _current = Theme.Label("", Theme.Big, Theme.Accent);
-        Controls.AddRange(new Control[] { _title, _subtitle, _current });
+        _lizardNote = Theme.Label(lizard?.Text ?? "", Theme.Small, lizard is { Warning: true } ? Theme.Warning : Theme.Ok);
+        _lizardNote.AutoEllipsis = true;
+        _lizardNote.Visible = lizard != null;
+        Controls.AddRange(new Control[] { _title, _subtitle, _current, _lizardNote });
 
         foreach (var (page, text) in new[] { (Page.Keyboard, "Klawiatura"), (Page.Mouse, "Mysz"), (Page.Special, "Specjalne"), (Page.Text, "Tekst") })
         {
@@ -159,8 +165,9 @@ sealed class ActionPicker : DarkDialog
         _pages[Page.Keyboard].Controls.Add(_grid);
 
         // --- mysz ---
-        _mouseNote = Theme.Label("Uwaga: MTA ignoruje programową mysz – tam te akcje nie działają. Kamera i strzelanie " +
-                                 "zostają na lizard mode (prawy touchpad = kursor, R2 = lewy klik, L2 = prawy klik).",
+        _mouseNote = Theme.Label("Akcje myszy NIE działają w MTA na serwerze – MTA przyjmuje tylko sprzętową mysz. " +
+                                 "Użyj sprzętowej myszy lizarda: prawy touchpad = kursor, R2 = lewy klik, L2 = prawy klik. " +
+                                 "Na pulpicie i w innych grach te akcje działają.",
             Theme.Small, Theme.Warning);
         _mouseNote.TextAlign = ContentAlignment.TopLeft;
         _pages[Page.Mouse].Controls.Add(_mouseNote);
@@ -182,6 +189,7 @@ sealed class ActionPicker : DarkDialog
         AddSpecial("Wstrzymaj / wznów", "mapowanie", "@Pause");
         AddSpecial("Otwórz edytor", "to okno", "@Editor");
         AddSpecial("Następny profil", "alfabetycznie", "@NextProfile");
+        AddSpecial("Koło profili", "trzymaj = koło, puść = wybór", "@ProfileWheel");
         foreach (var layer in layers) AddSpecial($"Warstwa: {layer}", "trzymaj = warstwa aktywna", "@Layer:" + layer);
         foreach (var profile in profiles) AddSpecial($"Profil: {profile}", "przełącz na ten profil", "@Profile:" + profile);
 
@@ -372,7 +380,7 @@ sealed class ActionPicker : DarkDialog
         var result = Result;
         if (_kind == Kind.Text && result == "Text:") result = "";
         string text = KeyCatalog.IsNone(result) ? "Brak akcji" : KeyCatalog.Describe(result);
-        if (KeyCatalog.UsesMouse(result)) text += "   (mysz – w MTA nie działa)";
+        if (KeyCatalog.UsesMouse(result)) text += "   (mysz – w MTA na serwerze nie działa)";
         _current.Text = "Akcja: " + text;
         _current.ForeColor = KeyCatalog.IsNone(result) ? Theme.TextDim : Theme.Accent;
     }
@@ -399,11 +407,16 @@ sealed class ActionPicker : DarkDialog
 
         _title.Bounds = new Rectangle(pad, pad, w / 2, S(34));
         _subtitle.Bounds = new Rectangle(pad, _title.Bottom, w / 2, S(22));
+        if (_lizardNote.Visible)
+        {
+            _lizardNote.Bounds = new Rectangle(pad, _subtitle.Bottom, w, S(24));
+            _subtitle.Height = S(22);
+        }
         _current.Bounds = new Rectangle(pad + w / 2, pad, w / 2, S(56));
         _current.TextAlign = ContentAlignment.MiddleRight;
 
         // zakładki + modyfikatory w jednym rzędzie
-        int y = _subtitle.Bottom + S(8);
+        int y = (_lizardNote.Visible ? _lizardNote.Bottom : _subtitle.Bottom) + S(8);
         int tabW = Math.Min(S(170), (w - S(3 * 110) - gap * 7) / 4);
         int x = pad;
         foreach (var tab in _tabs.Values)
@@ -427,8 +440,8 @@ sealed class ActionPicker : DarkDialog
         _grid.Bounds = new Rectangle(0, 0, pageRect.Width, pageRect.Height);
 
         // mysz: notka + siatka 3 kolumny
-        _mouseNote.Bounds = new Rectangle(0, 0, pageRect.Width, S(44));
-        GridLayout(_mouseButtons.Select(m => (Control)m.Button).ToList(), new Rectangle(0, S(50), pageRect.Width, pageRect.Height - S(50)), 3, S(64));
+        _mouseNote.Bounds = new Rectangle(0, 0, pageRect.Width, S(60));
+        GridLayout(_mouseButtons.Select(m => (Control)m.Button).ToList(), new Rectangle(0, S(66), pageRect.Width, pageRect.Height - S(66)), 3, S(64));
 
         // specjalne: siatka 3 kolumny
         GridLayout(_specialButtons.Select(s => (Control)s.Button).ToList(), new Rectangle(0, 0, pageRect.Width, pageRect.Height), 3, S(64));
@@ -469,9 +482,9 @@ sealed class ActionPicker : DarkDialog
 
     /// <summary>Zwraca nową akcję ("" = brak) albo null, gdy anulowano.</summary>
     public static string? Pick(IWin32Window? owner, string controlName, string context, string? initial,
-        IReadOnlyList<string> layers, IReadOnlyList<string> profiles, KeyboardHost keyboard)
+        IReadOnlyList<string> layers, IReadOnlyList<string> profiles, KeyboardHost keyboard, PickerLizardInfo? lizard = null)
     {
-        using var picker = new ActionPicker(controlName, context, initial, layers, profiles, keyboard);
+        using var picker = new ActionPicker(controlName, context, initial, layers, profiles, keyboard, lizard);
         if (picker.ShowDialog(owner) != DialogResult.OK) return null;
         var result = picker.Result;
         return result == "Text:" ? "" : result;

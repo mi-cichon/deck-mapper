@@ -23,7 +23,7 @@ sealed class CompiledConfig
     public float StickDeadzone { get; init; }
     public float TriggerThreshold { get; init; }
     public float LeftPadDeadzone { get; init; }
-    public bool DisableLizardButtons { get; init; }
+    public required LizardProfileSettings Lizard { get; init; }
 }
 
 // Surowy model pliku JSON (= format profilu). Kolejność właściwości = kolejność w zapisanym pliku.
@@ -32,11 +32,82 @@ sealed class RawConfig
     public float StickDeadzone { get; set; } = 0.35f;
     public float TriggerThreshold { get; set; } = 0.5f;
     public float LeftPadDeadzone { get; set; } = 0.3f;
-    public bool DisableLizardButtons { get; set; }
+
+    /// <summary>
+    /// Stara opcja (0x81 co 2 s). Na Decku wyłączała też mysz lizarda – zastąpiona sekcją "lizard".
+    /// Tylko odczyt do migracji; Normalize ją zeruje, więc nie trafia do zapisu.
+    /// </summary>
+    public bool? DisableLizardButtons { get; set; }
+
+    public RawLizard? Lizard { get; set; }
+
+    /// <summary>Etykieta w kole profili (maks. 6 znaków). Brak = pierwsze 6 znaków nazwy.</summary>
+    public string? WheelLabel { get; set; }
+
+    /// <summary>Ikona w kole: emoji albo nazwa pliku PNG z profiles/icons/.</summary>
+    public string? WheelIcon { get; set; }
+
     public RawStick? LeftStick { get; set; }
     public RawStick? RightStick { get; set; }
     public Dictionary<string, string?>? Bindings { get; set; }
     public Dictionary<string, Dictionary<string, string?>>? Layers { get; set; }
+}
+
+/// <summary>Sekcja "lizard" profilu: { "filterKeys": true, "swallow": "auto" | ["Enter", "Esc", …] }.</summary>
+sealed class RawLizard
+{
+    public bool FilterKeys { get; set; } = true;
+    public RawSwallow Swallow { get; set; } = RawSwallow.Auto();
+}
+
+[JsonConverter(typeof(RawSwallowConverter))]
+sealed class RawSwallow
+{
+    public bool IsAuto { get; set; } = true;
+    public List<string> Keys { get; set; } = new();
+
+    public static RawSwallow Auto() => new() { IsAuto = true };
+    public static RawSwallow List(IEnumerable<string> keys) => new() { IsAuto = false, Keys = keys.ToList() };
+}
+
+/// <summary>"swallow": "auto" albo tablica nazw klawiszy.</summary>
+sealed class RawSwallowConverter : JsonConverter<RawSwallow>
+{
+    public override RawSwallow Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        switch (reader.TokenType)
+        {
+            case JsonTokenType.String:
+                var text = reader.GetString();
+                if (string.Equals(text?.Trim(), "auto", StringComparison.OrdinalIgnoreCase)) return RawSwallow.Auto();
+                throw new JsonException($"lizard.swallow: \"{text}\" – dozwolone \"auto\" albo lista klawiszy");
+            case JsonTokenType.StartArray:
+                var keys = new List<string>();
+                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                {
+                    if (reader.TokenType != JsonTokenType.String) throw new JsonException("lizard.swallow: lista musi zawierać nazwy klawiszy");
+                    var key = reader.GetString();
+                    if (!string.IsNullOrWhiteSpace(key)) keys.Add(key.Trim());
+                }
+                return RawSwallow.List(keys);
+            case JsonTokenType.Null:
+                return RawSwallow.Auto();
+            default:
+                throw new JsonException("lizard.swallow: dozwolone \"auto\" albo lista klawiszy");
+        }
+    }
+
+    public override void Write(Utf8JsonWriter writer, RawSwallow value, JsonSerializerOptions options)
+    {
+        if (value.IsAuto)
+        {
+            writer.WriteStringValue("auto");
+            return;
+        }
+        writer.WriteStartArray();
+        foreach (var key in value.Keys) writer.WriteStringValue(key);
+        writer.WriteEndArray();
+    }
 }
 
 sealed class RawStick
@@ -129,6 +200,8 @@ static class ConfigLoader
             foreach (var (name, map) in raw.Layers)
                 layers[name] = CompileMap(map, $"layers.{name}", errors);
 
+        if (WheelLabels.Validate(raw.WheelLabel) is { } labelError) errors.Add($"wheelLabel: {labelError}");
+
         var allActions = bindings.Values.Concat(layers.Values.SelectMany(l => l.Values)).ToList();
         foreach (var layer in allActions.OfType<LayerAction>().Select(a => a.Name).Distinct(StringComparer.OrdinalIgnoreCase))
             if (!layers.ContainsKey(layer))
@@ -148,8 +221,25 @@ static class ConfigLoader
             StickDeadzone = Math.Clamp(raw.StickDeadzone, 0.05f, 0.9f),
             TriggerThreshold = Math.Clamp(raw.TriggerThreshold, 0.05f, 1f),
             LeftPadDeadzone = Math.Clamp(raw.LeftPadDeadzone, 0f, 0.9f),
-            DisableLizardButtons = raw.DisableLizardButtons,
+            Lizard = CompileLizard(raw.Lizard, errors),
         };
+        // (wheelLabel/wheelIcon nie trafiają do CompiledConfig – czyta je koło z surowego profilu)
+    }
+
+    /// <summary>Brak sekcji = filtr włączony, połykaj wszystko z mapy (migracja starych profili).</summary>
+    static LizardProfileSettings CompileLizard(RawLizard? raw, List<string> errors)
+    {
+        if (raw == null) return LizardProfileSettings.Default;
+        var swallow = raw.Swallow ?? RawSwallow.Auto();
+        if (swallow.IsAuto) return new LizardProfileSettings(raw.FilterKeys, true, Array.Empty<string>());
+
+        var keys = new List<string>();
+        foreach (var key in swallow.Keys)
+        {
+            if (LizardKeys.TryParse(key, out _)) keys.Add(key);
+            else errors.Add($"lizard.swallow: nieznany klawisz \"{key}\"");
+        }
+        return new LizardProfileSettings(raw.FilterKeys, false, keys);
     }
 
     static Dictionary<DeckControl, BindingAction?> CompileMap(Dictionary<string, string?>? source, string where, List<string> errors)
@@ -201,6 +291,11 @@ static class ConfigLoader
                     layers[name.Trim()] = NormalizeMap(map);
         raw.Layers = layers;
 
+        // migracja: stara opcja disableLizardButtons (0x81) znika, sekcja "lizard" dostaje domyślne wartości
+        raw.DisableLizardButtons = null;
+        raw.Lizard ??= new RawLizard();
+        raw.Lizard.Swallow ??= RawSwallow.Auto();
+
         raw.LeftStick ??= new RawStick();
         raw.RightStick ??= new RawStick();
         raw.LeftStick.Mode = NormalizeMode(raw.LeftStick.Mode, StickMode.Keys);
@@ -240,7 +335,9 @@ static class ConfigLoader
             StickDeadzone = raw.StickDeadzone,
             TriggerThreshold = raw.TriggerThreshold,
             LeftPadDeadzone = raw.LeftPadDeadzone,
-            DisableLizardButtons = raw.DisableLizardButtons,
+            Lizard = raw.Lizard ?? new RawLizard(),
+            WheelLabel = string.IsNullOrWhiteSpace(raw.WheelLabel) ? null : raw.WheelLabel.Trim(),
+            WheelIcon = string.IsNullOrWhiteSpace(raw.WheelIcon) ? null : raw.WheelIcon.Trim(),
             LeftStick = raw.LeftStick,
             RightStick = raw.RightStick,
             Bindings = Ordered(raw.Bindings),

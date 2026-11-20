@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Testy logiki bez WinForms/Win32 – budują się i przechodzą na macOS (dotnet test).
+    Aplikacja celuje w net8.0-windows, więc zamiast referencji do projektu linkujemy pliki rdzenia.
+    Nowy plik rdzenia = dopisz go tutaj (i pilnuj, żeby nie używał System.Windows.Forms ani P/Invoke).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>DeckMapper.Tests</RootNamespace>
+    <!-- kod jak w aplikacji (net8.0), ale uruchomienie także na nowszym runtime, gdy na Macu nie ma .NET 8 -->
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../src/Lizard/*.cs" Link="Core/Lizard/%(Filename)%(Extension)" />
+    <Compile Include="../../src/Wheel/*.cs" Link="Core/Wheel/%(Filename)%(Extension)" />
+    <Compile Include="../../src/Mapping/Config.cs" Link="Core/Mapping/Config.cs" />
+    <Compile Include="../../src/Mapping/Actions.cs" Link="Core/Mapping/Actions.cs" />
+    <Compile Include="../../src/Mapping/HeldCounter.cs" Link="Core/Mapping/HeldCounter.cs" />
+    <Compile Include="../../src/Mapping/DefaultConfig.cs" Link="Core/Mapping/DefaultConfig.cs" />
+    <Compile Include="../../src/Input/KeyNames.cs" Link="Core/Input/KeyNames.cs" />
+    <Compile Include="../../src/Controller/DeckControl.cs" Link="Core/Controller/DeckControl.cs" />
+    <Compile Include="../../src/Log.cs" Link="Core/Log.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+</Project>

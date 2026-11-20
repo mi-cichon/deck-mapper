@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 
 namespace DeckMapper;
@@ -13,6 +14,7 @@ sealed class ControllerWorker : IDisposable
     volatile bool _connected;
 
     CompiledConfig? _pendingConfig;
+    string? _pendingLizardRestore; // powód przywrócenia domyślnego lizarda (null = nic do zrobienia)
     int _pauseRequests;
     volatile bool _suspend;
 
@@ -40,8 +42,19 @@ sealed class ControllerWorker : IDisposable
 
     public void RequestTogglePause() => Interlocked.Increment(ref _pauseRequests);
 
+    volatile WheelSnapshot _wheel = WheelSnapshot.Empty;
+
+    /// <summary>Nowa konfiguracja koła profili (z settings.json) – worker przekaże ją Mapperowi.</summary>
+    public void SetWheel(WheelSettings settings) =>
+        _wheel = new WheelSnapshot(settings.Slots.ToArray(), settings.Clone());
+
+    /// <summary>Przywróć domyślny lizard (0x85 + 0x8E) w następnym obiegu wątku kontrolera.</summary>
+    public void RequestLizardRestore(string reason) => Interlocked.Exchange(ref _pendingLizardRestore, reason);
+
     /// <summary>Wstrzymuje mapowanie na czas edycji (wątek kontrolera zastosuje to w następnym obiegu).</summary>
     public void SetSuspended(bool suspended) => _suspend = suspended;
+
+    public bool Suspended => _suspend;
 
     public bool TryGetSnapshot(DeckState target)
     {
@@ -58,8 +71,7 @@ sealed class ControllerWorker : IDisposable
         using var controller = new SteamDeckController();
         var state = new DeckState();
         var clock = Stopwatch.StartNew();
-        double lastFrame = 0, lastHeartbeat = -10;
-        bool lizardCleared = false;
+        double lastFrame = 0;
 
         while (_running)
         {
@@ -74,20 +86,19 @@ sealed class ControllerWorker : IDisposable
                         continue;
                     }
                     SetConnected(true);
-                    lastHeartbeat = -10;
+                    // na wypadek crasha / starej wersji, która zostawiła kontroler po 0x81
+                    controller.RestoreDefaultLizard("połączenie z kontrolerem");
+                    Interlocked.Exchange(ref _pendingLizardRestore, null);
                     lastFrame = clock.Elapsed.TotalSeconds;
                 }
 
                 var pending = Interlocked.Exchange(ref _pendingConfig, null);
-                if (pending != null)
-                {
-                    _mapper.SetConfig(pending);
-                    if (!pending.DisableLizardButtons && lizardCleared)
-                    {
-                        controller.RestoreLizardButtons();
-                        lizardCleared = false;
-                    }
-                }
+                if (pending != null) _mapper.SetConfig(pending);
+
+                var restore = Interlocked.Exchange(ref _pendingLizardRestore, null);
+                if (restore != null) controller.RestoreDefaultLizard(restore);
+
+                _mapper.Wheel = _wheel;
 
                 bool suspend = _suspend;
                 if (suspend != _mapper.Suspended) _mapper.SetSuspended(suspend);
@@ -95,26 +106,16 @@ sealed class ControllerWorker : IDisposable
                 while (Interlocked.Exchange(ref _pauseRequests, 0) > 0)
                     _mapper.TogglePause();
 
-                double now = clock.Elapsed.TotalSeconds;
-
-                // kontroler sam wraca do lizard mode po kilku sekundach – trzeba przypominać
-                if (_mapper.Config.DisableLizardButtons && now - lastHeartbeat > 2)
-                {
-                    controller.ClearLizardButtons();
-                    lastHeartbeat = now;
-                    lizardCleared = true;
-                }
-
                 switch (controller.Read(state))
                 {
                     case ReadResult.Disconnected:
-                        _mapper.ReleaseAll();
+                        _mapper.ReleaseAll("rozłączenie kontrolera", rearm: true);
                         continue;
                     case ReadResult.Timeout:
                         continue;
                 }
 
-                now = clock.Elapsed.TotalSeconds;
+                double now = clock.Elapsed.TotalSeconds;
                 double dt = Math.Clamp(now - lastFrame, 0, 0.05);
                 lastFrame = now;
 
@@ -129,13 +130,13 @@ sealed class ControllerWorker : IDisposable
             catch (Exception e)
             {
                 Log.Error("Pętla kontrolera", e);
-                _mapper.ReleaseAll();
+                _mapper.ReleaseAll("błąd w pętli kontrolera", rearm: true);
                 Thread.Sleep(500);
             }
         }
 
-        _mapper.ReleaseAll();
-        if (lizardCleared) controller.RestoreLizardButtons();
+        _mapper.ReleaseAll("zamknięcie aplikacji", rearm: false);
+        if (controller.IsConnected) controller.RestoreDefaultLizard("zamknięcie aplikacji");
     }
 
     void SetConnected(bool connected)
